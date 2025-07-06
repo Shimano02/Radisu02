@@ -1,0 +1,41 @@
+# 大きなファイル
+assets/Avatar.mp4
+assets/Avatar.png
+
+# システムファイル
+.DS_Store
+Thumbs.db
+
+# ログファイル
+*.log
+
+# 一時ファイル
+*.tmp
+*.temp
+
+# 環境設定ファイル
+.env
+.env.local
+
+# IDE設定
+.vscode/
+.idea/
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# その他
+*.swp
+*.swo
+*~ 
