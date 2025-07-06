@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI面接システム</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/animations.css">
+</head>
+<body>
+    <div class="main-container">
+        <!-- ヘッダーツールバー -->
+        <div class="header-toolbar">
+            <div class="header-left">
+                <div class="app-title">
+                    <i class="fas fa-video"></i>
+                    AI面接システム
+                </div>
+                <div class="recording-status stopped" id="recordingStatus">
+                    <span class="recording-dot stopped" id="recordingDot"></span>
+                    <span id="recordingText">録画停止</span>
+                </div>
+                <div class="recording-controls" id="recordingControls">
+                    <button class="control-btn start-btn" onclick="startRecording()" title="録画開始">
+                        <i class="fas fa-circle"></i>
+                    </button>
+                    <button class="control-btn stop-btn" id="stopRecordingBtn" onclick="stopRecording()" title="録画停止" disabled>
+                        <i class="fas fa-stop"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="timer" id="timer">00:00</div>
+                <div class="progress-info" id="progressInfo">質問 0/0</div>
+            </div>
+        </div>
+
+        <!-- メインコンテンツ -->
+        <div class="content-area">
+            <!-- ビデオセクション -->
+            <div class="video-section">
+                <!-- 面接官パネル -->
+                <div class="video-panel">
+                    <div class="video-container" id="interviewerContainer">
+                        <video class="interviewer-video" id="interviewerVideo" autoplay muted loop style="display:none;">
+                            <source src="assets/Avatar.mp4" type="video/mp4">
+                        </video>
+                        <img class="interviewer-image" id="interviewerImage" src="assets/Avatar.png" alt="Dadish Avatar" style="display:block;" />
+                        <div class="camera-placeholder" style="display: none;">
+                            <i class="fas fa-user-tie"></i>
+                            <div>AI面接官 Dadish</div>
+                        </div>
+                    </div>
+                    <div class="video-info">
+                        <div class="participant-name">AI面接官 Dadish</div>
+                        <div class="participant-controls">
+                            <button class="active" title="音声ON">
+                                <i class="fas fa-microphone"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 面接者パネル -->
+                <div class="video-panel">
+                    <div class="video-container" id="candidateContainer">
+                        <video class="candidate-video" id="candidateVideo" autoplay muted playsinline style="display: none;"></video>
+                        <div class="camera-placeholder" id="cameraPlaceholder">
+                            <i class="fas fa-video-slash"></i>
+                            <div>カメラが接続されていません</div>
+                        </div>
+                    </div>
+                    <div class="video-info">
+                        <div class="participant-name" id="participantName">面接者</div>
+                        <div class="participant-controls">
+                            <div id="candidateCamera" class="participant-control"></div>
+                            <div id="candidateMic" class="participant-control"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- チャットエリア -->
+        <div class="chat-area">
+            <div class="interview-status" id="interviewStatus">
+                面接を開始してください
+            </div>
+
+            <div class="error-message" id="errorMessage"></div>
+
+            <div class="chat-messages" id="chatMessages"></div>
+
+            <div class="loading" id="loading">
+                <i class="fas fa-spinner"></i>
+                AIが回答を分析中...
+            </div>
+
+            <!-- 名前入力エリア -->
+            <div class="name-input-area" id="nameInputArea">
+                <input type="text" id="candidateName" placeholder="お名前を入力してください（任意）">
+                <button class="btn" id="startBtn" onclick="startInterview()">
+                    <i class="fas fa-play"></i>
+                    面接開始
+                </button>
+            </div>
+
+            <!-- 回答入力エリア -->
+            <div class="input-area" id="responseArea" style="display: none;">
+                <textarea id="responseInput" placeholder="こちらに回答を入力してください..."></textarea>
+                <button class="btn" id="submitBtn" onclick="submitResponse()">
+                    <i class="fas fa-paper-plane"></i>
+                    送信
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/AIInterviewer.js"></script>
+    <script src="js/GASConnector.js"></script>
+    <script src="js/VideoController.js"></script>
+    <script src="js/RecordingController.js"></script>
+    <script src="js/InterviewSystem.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI面接システム - 録画制御機能付き</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1e2124;
+            --bg-secondary: #2f3136;
+            --bg-tertiary: #36393f;
+            --text-primary: #ffffff;
+            --text-secondary: #b9bbbe;
+            --accent-blue: #5865f2;
+            --accent-green: #57f287;
+            --accent-red: #ed4245;
+            --accent-orange: #ffa500;
+            --border-color: #40444b;
+            --shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        /* Top Toolbar */
+        .top-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 20px;
+            background-color: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            box-shadow: var(--shadow);
+        }
+
+        .toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .app-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 16px;
+        }
+
+        .recording-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .recording-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .recording-status.active {
+            background-color: rgba(237, 66, 69, 0.2);
+            border: 1px solid var(--accent-red);
+        }
+
+        .recording-status.inactive {
+            background-color: rgba(185, 187, 190, 0.2);
+            border: 1px solid var(--text-secondary);
+        }
+
+        .recording-status.paused {
+            background-color: rgba(255, 165, 0, 0.2);
+            border: 1px solid var(--accent-orange);
+        }
+
+        .recording-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent-red);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .recording-dot.paused {
+            background-color: var(--accent-orange);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .recording-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .control-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+        }
+
+        .control-btn:hover {
+            transform: scale(1.05);
+        }
+
+        .control-btn.record {
+            background-color: var(--accent-red);
+            color: white;
+        }
+
+        .control-btn.stop {
+            background-color: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .control-btn.pause {
+            background-color: var(--accent-orange);
+            color: white;
+        }
+
+        .control-btn.resume {
+            background-color: var(--accent-green);
+            color: white;
+        }
+
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 14px;
+        }
+
+        .timer {
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .progress-info {
+            color: var(--text-secondary);
+        }
+
+        /* Video Conference Layout */
+        .video-container {
+            display: flex;
+            flex: 1;
+            gap: 2px;
+            padding: 2px;
+            background-color: var(--bg-primary);
+        }
+
+        .video-panel {
+            flex: 1;
+            background-color: var(--bg-secondary);
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-content {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            background-color: var(--bg-tertiary);
+        }
+
+        .interviewer-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 8px;
+        }
+
+        .candidate-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 8px;
+        }
+
+        .camera-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            font-size: 16px;
+        }
+
+        .camera-placeholder i {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        .video-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background-color: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .participant-name {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .participant-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .participant-control {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .participant-control.active {
+            color: var(--accent-green);
+        }
+
+        .participant-control.muted {
+            color: var(--accent-red);
+        }
+
+        /* Chat Area */
+        .chat-container {
+            background-color: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            padding: 20px;
+        }
+
+        .current-question {
+            background-color: var(--bg-tertiary);
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            border-left: 4px solid var(--accent-blue);
+        }
+
+        .question-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .question-text {
+            font-size: 16px;
+            line-height: 1.5;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .response-input {
+            flex: 1;
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            color: var(--text-primary);
+            font-size: 14px;
+            resize: vertical;
+            min-height: 60px;
+            max-height: 120px;
+        }
+
+        .response-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .input-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .submit-btn, .voice-btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .submit-btn {
+            background-color: var(--accent-blue);
+            color: white;
+        }
+
+        .submit-btn:hover {
+            background-color: #4752c4;
+        }
+
+        .submit-btn:disabled {
+            background-color: var(--bg-tertiary);
+            color: var(--text-secondary);
+            cursor: not-allowed;
+        }
+
+        .voice-btn {
+            background-color: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .voice-btn:hover {
+            background-color: var(--border-color);
+        }
+
+        .voice-btn.recording {
+            background-color: var(--accent-red);
+            color: white;
+        }
+
+        /* Animation Effects */
+        .speaking-glow {
+            box-shadow: 0 0 20px rgba(88, 101, 242, 0.4);
+            border: 2px solid rgba(88, 101, 242, 0.6);
+        }
+
+        .listening-pulse {
+            animation: listeningPulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes listeningPulse {
+            0%, 100% {
+                box-shadow: 0 0 15px rgba(87, 242, 135, 0.3);
+            }
+            50% {
+                box-shadow: 0 0 30px rgba(87, 242, 135, 0.6);
+            }
+        }
+
+        .thinking-shimmer {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .thinking-shimmer::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { left: -100%; }
+            100% { left: 100%; }
+        }
+
+        /* Start Screen */
+        .start-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(30, 33, 36, 0.95);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .start-card {
+            background-color: var(--bg-secondary);
+            padding: 40px;
+            border-radius: 12px;
+            text-align: center;
+            max-width: 400px;
+            box-shadow: var(--shadow);
+        }
+
+        .start-card h2 {
+            margin-bottom: 20px;
+            color: var(--text-primary);
+        }
+
+        .start-card input {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 20px;
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .start-card button {
+            width: 100%;
+            padding: 12px;
+            background-color: var(--accent-blue);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .start-card button:hover {
+            background-color: #4752c4;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Status Messages */
+        .status-message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            z-index: 1001;
+            animation: slideIn 0.3s ease;
+        }
+
+        .status-message.success {
+            background-color: var(--accent-green);
+        }
+
+        .status-message.error {
+            background-color: var(--accent-red);
+        }
+
+        .status-message.info {
+            background-color: var(--accent-blue);
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <!-- Top Toolbar -->
+        <div class="top-toolbar">
+            <div class="toolbar-left">
+                <div class="app-title">
+                    <i class="fas fa-video"></i>
+                    AI面接システム
+                </div>
+                <div class="recording-section">
+                    <div class="recording-status inactive" id="recordingStatus">
+                        <span class="recording-dot" id="recordingDot"></span>
+                        <span id="recordingText">録画停止</span>
+                    </div>
+                    <div class="recording-controls">
+                        <button class="control-btn record" id="recordBtn" title="録画開始">
+                            <i class="fas fa-circle"></i>
+                        </button>
+                        <button class="control-btn pause" id="pauseBtn" title="一時停止" disabled>
+                            <i class="fas fa-pause"></i>
+                        </button>
+                        <button class="control-btn stop" id="stopBtn" title="録画停止" disabled>
+                            <i class="fas fa-stop"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="toolbar-right">
+                <div class="timer" id="timer">00:00</div>
+                <div class="progress-info" id="progressInfo">質問 1/5</div>
+            </div>
+        </div>
+
+        <!-- Video Conference Area -->
+        <div class="video-container">
+            <!-- Interviewer Panel -->
+            <div class="video-panel">
+                <div class="video-content" id="interviewerContainer">
+                    <video class="interviewer-video" id="interviewerVideo" autoplay muted loop playsinline webkit-playsinline>
+                        <source src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDE=" type="video/mp4">
+                    </video>
+                </div>
+                <div class="video-footer">
+                    <div class="participant-name">AI面接官 さくら</div>
+                    <div class="participant-controls">
+                        <div class="participant-control active">
+                            <i class="fas fa-microphone"></i>
+                            <span>ミュート解除</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Candidate Panel -->
+            <div class="video-panel">
+                <div class="video-content">
+                    <video class="candidate-video" id="candidateVideo" autoplay muted playsinline webkit-playsinline style="display: none;"></video>
+                    <div class="camera-placeholder" id="cameraPlaceholder">
+                        <i class="fas fa-video-slash"></i>
+                        <span>カメラが接続されていません</span>
+                    </div>
+                </div>
+                <div class="video-footer">
+                    <div class="participant-name" id="candidateName">面接者</div>
+                    <div class="participant-controls">
+                        <div class="participant-control muted" id="candidateMic">
+                            <i class="fas fa-microphone-slash"></i>
+                            <span>ミュート</span>
+                        </div>
+                        <div class="participant-control" id="candidateCamera">
+                            <i class="fas fa-video-slash"></i>
+                            <span>カメラOFF</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="chat-container">
+            <div class="current-question">
+                <div class="question-label">
+                    <i class="fas fa-comment-dots"></i>
+                    <span>現在の質問</span>
+                </div>
+                <div class="question-text" id="currentQuestion">
+                    面接を開始してください。まず、簡単に自己紹介をお願いします。
+                </div>
+            </div>
+            <div class="input-area">
+                <textarea class="response-input" id="responseInput" placeholder="こちらに回答を入力してください..."></textarea>
+                <div class="input-controls">
+                    <button class="submit-btn" id="submitBtn">送信</button>
+                    <button class="voice-btn" id="voiceBtn">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Start Screen -->
+    <div class="start-screen" id="startScreen">
+        <div class="start-card">
+            <h2>AI面接システム</h2>
+            <p style="margin-bottom: 20px; color: var(--text-secondary);">
+                面接を開始します。お名前を入力してください。
+            </p>
+            <input type="text" id="candidateNameInput" placeholder="お名前（任意）" />
+            <button onclick="startInterview()">面接開始</button>
+        </div>
+    </div>
+
+    <script>
+        class InterviewSystem {
+            constructor() {
+                this.isRecording = false;
+                this.isPaused = false;
+                this.mediaRecorder = null;
+                this.recordedChunks = [];
+                this.startTime = null;
+                this.pausedTime = 0;
+                this.timerInterval = null;
+                this.currentQuestion = 1;
+                this.totalQuestions = 5;
+                this.stream = null;
+                this.videoController = new VideoController();
+                this.initializeElements();
+                this.setupEventListeners();
+            }
+
+            initializeElements() {
+                this.elements = {
+                    recordBtn: document.getElementById('recordBtn'),
+                    pauseBtn: document.getElementById('pauseBtn'),
+                    stopBtn: document.getElementById('stopBtn'),
+                    recordingStatus: document.getElementById('recordingStatus'),
+                    recordingDot: document.getElementById('recordingDot'),
+                    recordingText: document.getElementById('recordingText'),
+                    timer: document.getElementById('timer'),
+                    progressInfo: document.getElementById('progressInfo'),
+                    candidateVideo: document.getElementById('candidateVideo'),
+                    cameraPlaceholder: document.getElementById('cameraPlaceholder'),
+                    responseInput: document.getElementById('responseInput'),
+                    submitBtn: document.getElementById('submitBtn'),
+                    voiceBtn: document.getElementById('voiceBtn'),
+                    currentQuestion: document.getElementById('currentQuestion'),
+                    candidateName: document.getElementById('candidateName')
+                };
+            }
+
+            setupEventListeners() {
+                this.elements.recordBtn.addEventListener('click', () => this.startRecording());
+                this.elements.pauseBtn.addEventListener('click', () => this.pauseRecording());
+                this.elements.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.elements.submitBtn.addEventListener('click', () => this.submitResponse());
+                this.elements.voiceBtn.addEventListener('click', () => this.toggleVoiceInput());
+                this.elements.responseInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.submitResponse();
+                    }
+                });
+            }
+
+            async startRecording() {
+                try {
+                    if (!this.stream) {
+                        this.stream = await navigator.mediaDevices.getUserMedia({
+                            video: true,
+                            audio: true
+                        });
+                        this.elements.candidateVideo.srcObject = this.stream;
+                        this.elements.candidateVideo.style.display = 'block';
+                        this.elements.cameraPlaceholder.style.display = 'none';
+                        this.updateCameraStatus(true);
+                    }
+
+                    this.mediaRecorder = new MediaRecorder(this.stream);
+                    this.recordedChunks = [];
+
+                    this.mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            this.recordedChunks.push(event.data);
+                        }
+                    };
+
+                    this.mediaRecorder.onstop = () => {
+                        const blob = new Blob(this.recordedChunks, { type: 'video/mp4' });
+                        const url = URL.createObjectURL(blob);
+                        this.downloadRecording(url);
+                    };
+
+                    this.mediaRecorder.start();
+                    this.isRecording = true;
+                    this.isPaused = false;
+                    this.startTime = Date.now() - this.pausedTime;
+                    this.updateRecordingUI();
+                    this.startTimer();
+                    this.showStatus('録画を開始しました', 'success');
+                } catch (error) {
+                    console.error('録画開始エラー:', error);
+                    this.showStatus('録画の開始に失敗しました', 'error');
+                }
+            }
+
+            pauseRecording() {
+                if (this.mediaRecorder && this.isRecording && !this.isPaused) {
+                    this.mediaRecorder.pause();
+                    this.isPaused = true;
+                    this.pausedTime = Date.now() - this.startTime;
+                    this.updateRecordingUI();
+                    this.stopTimer();
+                    this.showStatus('録画を一時停止しました', 'info');
+                } else if (this.mediaRecorder && this.isPaused) {
+                    this.mediaRecorder.resume();
+                    this.isPaused = false;
+                    this.startTime = Date.now() - this.pausedTime;
+                    this.updateRecordingUI();
+                    this.startTimer();
+                    this.showStatus('録画を再開しました', 'success');
+                }
+            }
+
+            stopRecording() {
+                if (this.mediaRecorder && this.isRecording) {
+                    this.mediaRecorder.stop();
+                    this.isRecording = false;
+                    this.isPaused = false;
+                    this.pausedTime = 0;
+                    this.updateRecordingUI();
+                    this.stopTimer();
+                    this.showStatus('録画を停止しました', 'info');
+                }
+            }
+
+            updateRecordingUI() {
+                const { recordBtn, pauseBtn, stopBtn, recordingStatus, recordingDot, recordingText } = this.elements;
+
+                if (this.isRecording && !this.isPaused) {
+                    recordingStatus.className = 'recording-status active';
+                    recordingDot.className = 'recording-dot';
+                    recordingText.textContent = '録画中';
+                    recordBtn.disabled = true;
+                    pauseBtn.disabled = false;
+                    stopBtn.disabled = false;
+                    pauseBtn.innerHTML = '<i class="fas fa-pause"></i>';
+                } else if (this.isRecording && this.isPaused) {
+                    recordingStatus.className = 'recording-status paused';
+                    recordingDot.className = 'recording-dot paused';
+                    recordingText.textContent = '一時停止中';
+                    recordBtn.disabled = true;
+                    pauseBtn.disabled = false;
+                    stopBtn.disabled = false;
+                    pauseBtn.innerHTML = '<i class="fas fa-play"></i>';
+                } else {
+                    recordingStatus.className = 'recording-status inactive';
+                    recordingDot.className = 'recording-dot';
+                    recordingText.textContent = '録画停止';
+                    recordBtn.disabled = false;
+                    pauseBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    pauseBtn.innerHTML = '<i class="fas fa-pause"></i>';
+                }
+            }
+
+            startTimer() {
+                this.timerInterval = setInterval(() => {
+                    const elapsed = Date.now() - this.startTime;
+                    const minutes = Math.floor(elapsed / 60000);
+                    const seconds = Math.floor((elapsed % 60000) / 1000);
+                    this.elements.timer.textContent = 
+                        `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                }, 1000);
+            }
+
+            stopTimer() {
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+            }
+
+            updateCameraStatus(isActive) {
+                const candidateCamera = document.getElementById('candidateCamera');
+                const candidateMic = document.getElementById('candidateMic');
+                
+                if (isActive) {
+                    candidateCamera.innerHTML = '<i class="fas fa-video"></i><span>カメラON</span>';
+                    candidateCamera.className = 'participant-control active';
+                    candidateMic.innerHTML = '<i class="fas fa-microphone"></i><span>ミュート解除</span>';
+                    candidateMic.className = 'participant-control active';
+                }
+            }
+
+            async submitResponse() {
+                const response = this.elements.responseInput.value.trim();
+                if (!response) {
+                    this.showStatus('回答を入力してください', 'error');
+                    return;
+                }
+
+                this.elements.submitBtn.disabled = true;
+                this.elements.responseInput.disabled = true;
+
+                // AI面接官の状態を分析中に変更
+                this.videoController.setState('thinking');
+                
+                try {
+                    // 模擬的な処理時間
+                    await this.delay(2000);
+                    
+                    // 次の質問へ進む
+                    this.nextQuestion();
+                    
+                    // 回答をクリア
+                    this.elements.responseInput.value = '';
+                    this.showStatus('回答を送信しました', 'success');
+                } catch (error) {
+                    this.showStatus('回答の送信に失敗しました', 'error');
+                } finally {
+                    this.elements.submitBtn.disabled = false;
+                    this.elements.responseInput.disabled = false;
+                    this.elements.responseInput.focus();
+                }
+            }
+
+            nextQuestion() {
+                const questions = [
+                    "まず、簡単に自己紹介をお願いします。",
+                    "あなたの得意な技術分野について教えてください。",
+                    "これまでで最も挑戦的だったプロジェクトについて教えてください。",
+                    "当社を志望する理由を教えてください。",
+                    "最後に、何か質問はありますか？"
+                ];
+
+                if (this.currentQuestion < this.totalQuestions) {
+                    this.currentQuestion++;
+                    this.elements.currentQuestion.textContent = questions[this.currentQuestion - 1];
+                    this.elements.progressInfo.textContent = `質問 ${this.currentQuestion}/${this.totalQuestions}`;
+                    
+                    // AI面接官の状態を質問中に変更
+                    this.videoController.setState('speaking');
+                    
+                    setTimeout(() => {
+                        this.videoController.setState('listening');
+                    }, 3000);
+                } else {
+                    this.elements.currentQuestion.textContent = "面接は以上で終了です。ありがとうございました！";
+                    this.elements.responseInput.disabled = true;
+                    this.elements.submitBtn.disabled = true;
+                    this.videoController.setState('idle');
+                    this.showStatus('面接が完了しました', 'success');
+                }
+            }
+
+            toggleVoiceInput() {
+                // 音声入力機能の実装（将来拡張）
+                this.showStatus('音声入力機能は開発中です', 'info');
+            }
+
+            downloadRecording(url) {
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `interview_recording_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.mp4`;
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+
+            showStatus(message, type) {
+                const statusDiv = document.createElement('div');
+                statusDiv.className = `status-message ${type}`;
+                statusDiv.textContent = message;
+                document.body.appendChild(statusDiv);
+
+                setTimeout(() => {
+                    statusDiv.remove();
+                }, 3000);
+            }
+
+            delay(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+        }
+
+        class VideoController {
+            constructor() {
+                this.videoElement = document.getElementById('interviewerVideo');
+                this.container = document.getElementById('interviewerContainer');
+                this.currentState = 'idle';
+                this.isTransitioning = false;
+            }
+
+            setState(newState) {
+                if (this.isTransitioning || this.currentState === newState) return;
+                
+                this.currentState = newState;
+                this.clearEffects();
+                
+                switch (newState) {
+                    case 'speaking':
+                        this.container.classList.add('speaking-glow');
+                        break;
+                    case 'listening':
+                        this.container.classList.add('listening-pulse');
+                        break;
+                    case 'thinking':
+                        this.container.classList.add('thinking-shimmer');
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            clearEffects() {
+                this.container.classList.remove('speaking-glow', 'listening-pulse', 'thinking-shimmer');
+            }
+        }
+
+        // Initialize the system
+        let interviewSystem;
+
+        function startInterview() {
+            const candidateNameInput = document.getElementById('candidateNameInput');
+            const candidateName = candidateNameInput.value.trim() || '面接者';
+            
+            document.getElementById('candidateName').textContent = candidateName;
+            document.getElementById('startScreen').classList.add('hidden');
+            
+            interviewSystem = new InterviewSystem();
+            interviewSystem.showStatus('面接を開始しました', 'success');
+        }
+
+        // Auto-start for demo
+        window.addEventListener('load', () => {
+            // Auto-hide start screen after 2 seconds for demo
+            setTimeout(() => {
+                startInterview();
+            }, 2000);
+        });
+    </script>
+</body>
+</html>
