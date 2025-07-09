@@ -1,0 +1,14 @@
+{
+  "name": "ai-interview-system",
+  "version": "1.0.0",
+  "description": "AI Interview System with Cloudflare Pages Functions",
+  "main": "index.html",
+  "scripts": {
+    "dev": "wrangler pages dev .",
+    "deploy": "wrangler pages deploy ."
+  },
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

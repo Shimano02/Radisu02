@@ -1,0 +1,2 @@
+# Headers for API endpoints
+/api/* /api/:splat 200

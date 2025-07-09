@@ -514,5 +514,4 @@ class AIInterviewer {
   }
 }
 
-// グローバルインスタンス
-window.AIInterviewer = AIInterviewer; 
+export default AIInterviewer;

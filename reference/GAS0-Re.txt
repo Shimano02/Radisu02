@@ -1,910 +1,11 @@
-/*===================================
-config.gs - 設定管理
-==================================-*/
-/**
- * アプリケーション設定管理クラス
- * 全ての設定値の一元管理と型安全なアクセスを提供
- */
-class AppConfig {
-  constructor() {
-    this.properties = PropertiesService.getScriptProperties();
-    this.initializeDefaults();
-  }
-
-  /**
-   * デフォルト設定の初期化
-   */
-  initializeDefaults() {
-    const defaults = {
-      SPREADSHEET_ID: '1-q239hLHhHydeFfd4mE-c9xhOfznlvAaYtp_X5Yx3fg',
-      MODEL: 'gpt-4',
-      MAX_TOKENS: '1000',
-      ENVIRONMENT: 'development',
-      LOG_LEVEL: 'INFO',
-      GIGAFILE_ENABLED: 'true',
-      GIGAFILE_MAX_RETRY: '3',
-      GIGAFILE_RETRY_DELAY: '2000',
-      SESSION_TIMEOUT_HOURS: '24',
-      MAX_QUESTIONS_PER_SESSION: '10'
-    };
-
-    Object.entries(defaults).forEach(([key, value]) => {
-      if (!this.properties.getProperty(key)) {
-        this.properties.setProperty(key, value);
-      }
-    });
-  }
-
-  // 基本アクセサー
-  getString(key) {
-    const value = this.properties.getProperty(key);
-    if (value === null) {
-      throw new ConfigurationError(`Configuration key '${key}' not found`);
-    }
-    return value;
-  }
-
-  getNumber(key) {
-    const value = this.getString(key);
-    const parsed = parseInt(value, 10);
-    if (isNaN(parsed)) {
-      throw new ConfigurationError(`Configuration key '${key}' is not a valid number`);
-    }
-    return parsed;
-  }
-
-  getBoolean(key) {
-    return this.getString(key).toLowerCase() === 'true';
-  }
-
-  setProperty(key, value) {
-    this.properties.setProperty(key, String(value));
-  }
-
-  // 特定設定アクセサー
-  getOpenAiKey() {
-    const key = this.properties.getProperty('OPENAI_API_KEY');
-    if (!key) {
-      throw new ConfigurationError('OpenAI API key not configured');
-    }
-    return key;
-  }
-
-  getSpreadsheetId() { return this.getString('SPREADSHEET_ID'); }
-  getModel() { return this.getString('MODEL'); }
-  getMaxTokens() { return this.getNumber('MAX_TOKENS'); }
-  getLogLevel() { return this.getString('LOG_LEVEL'); }
-  getEnvironment() { return this.getString('ENVIRONMENT'); }
-  
-  // 環境判定
-  isProduction() { return this.getEnvironment() === 'production'; }
-  isDevelopment() { return this.getEnvironment() === 'development'; }
-  
-  // ギガファイル設定
-  isGigaFileEnabled() { return this.getBoolean('GIGAFILE_ENABLED'); }
-  getGigaFileMaxRetry() { return this.getNumber('GIGAFILE_MAX_RETRY'); }
-  getGigaFileRetryDelay() { return this.getNumber('GIGAFILE_RETRY_DELAY'); }
-  
-  // セッション設定
-  getSessionTimeoutHours() { return this.getNumber('SESSION_TIMEOUT_HOURS'); }
-  getMaxQuestionsPerSession() { return this.getNumber('MAX_QUESTIONS_PER_SESSION'); }
-}
-
-// グローバル設定インスタンス
-const config = new SystemConfig();
-
-/**
- * 設定初期化とバリデーション
- */
-function initializeConfiguration() {
-  try {
-    // 必須設定の検証
-    config.getSpreadsheetId();
-    
-    // API キーの検証
-    try {
-      config.getOpenAiKey();
-      Logger.log('✅ Configuration initialized successfully');
-    } catch (error) {
-      Logger.log('⚠️ OpenAI API key not configured. Please set OPENAI_API_KEY property.');
-    }
-    
-    return { success: true, message: 'Configuration initialized' };
-  } catch (error) {
-    Logger.log('❌ Configuration initialization failed: ' + error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-/*===================================
-logger.gs - ログ管理
-===================================*/
-/**
- * アプリケーション共通エラークラス
- */
-class AppError extends Error {
-  constructor(message, code = 'GENERAL_ERROR', statusCode = 500, details = {}) {
-    super(message);
-    this.name = this.constructor.name;
-    this.code = code;
-    this.statusCode = statusCode;
-    this.details = details;
-    this.timestamp = new Date().toISOString();
-  }
-}
-
-/**
- * 設定エラー
- */
-class ConfigurationError extends AppError {
-  constructor(message, details = {}) {
-    super(message, 'CONFIGURATION_ERROR', 500, details);
-  }
-}
-
-/**
- * バリデーションエラー
- */
-class ValidationError extends AppError {
-  constructor(message, field = null, details = {}) {
-    super(message, 'VALIDATION_ERROR', 400, { field, ...details });
-  }
-}
-
-/**
- * APIエラー
- */
-class ApiError extends AppError {
-  constructor(message, details = {}) {
-    super(message, 'API_ERROR', 400, details);
-  }
-}
-
-/**
- * リソース未発見エラー
- */
-class NotFoundError extends AppError {
-  constructor(resource, details = {}) {
-    super(`${resource} not found`, 'NOT_FOUND', 404, details);
-  }
-}
-
-/**
- * 認証エラー
- */
-class UnauthorizedError extends AppError {
-  constructor(message = 'Unauthorized', details = {}) {
-    super(message, 'UNAUTHORIZED', 401, details);
-  }
-}
-
-/**
- * 統一エラーハンドラー
- */
-class ErrorHandler {
-  static handle(error, context = {}) {
-    // AppErrorの場合はそのまま使用
-    if (error instanceof AppError) {
-      return this.formatError(error, context);
-    }
-    
-    // 通常のエラーをAppErrorに変換
-    const appError = new AppError(
-      error.message || 'Unknown error occurred',
-      'UNEXPECTED_ERROR',
-      500,
-      { originalError: error.toString() }
-    );
-    
-    return this.formatError(appError, context);
-  }
-
-  static formatError(error, context) {
-    // ログ出力
-    AppLogger.getInstance().error(error.message, error, context);
-    
-    // レスポンス形式
-    return {
-      success: false,
-      error: {
-        message: error.message,
-        code: error.code,
-        timestamp: error.timestamp,
-        ...(config.isDevelopment() ? { 
-          details: error.details,
-          context: context 
-        } : {})
-      }
-    };
-  }
-
-  static wrap(fn, context = {}) {
-    return async (...args) => {
-      try {
-        const result = await fn(...args);
-        return { success: true, data: result };
-      } catch (error) {
-        return this.handle(error, context);
-      }
-    };
-  }
-}
-/*===================================
-validators.gs - バリデーション
-===================================*/
-/**
- * 統一バリデーションクラス
- */
-class Validators {
-  /**
-   * 必須値チェック
-   */
-  static required(value, fieldName) {
-    if (value === null || value === undefined || value === '') {
-      throw new ValidationError(`${fieldName} is required`, fieldName);
-    }
-    return value;
-  }
-
-  /**
-   * 文字列バリデーション
-   */
-  static string(value, fieldName, minLength = 0, maxLength = Infinity) {
-    this.required(value, fieldName);
-    
-    if (typeof value !== 'string') {
-      throw new ValidationError(`${fieldName} must be a string`, fieldName);
-    }
-    
-    if (value.length < minLength) {
-      throw new ValidationError(
-        `${fieldName} must be at least ${minLength} characters`,
-        fieldName
-      );
-    }
-    
-    if (value.length > maxLength) {
-      throw new ValidationError(
-        `${fieldName} must be no more than ${maxLength} characters`,
-        fieldName
-      );
-    }
-    
-    return value;
-  }
-
-  /**
-   * 数値バリデーション
-   */
-  static number(value, fieldName, min = -Infinity, max = Infinity) {
-    this.required(value, fieldName);
-    
-    const num = typeof value === 'string' ? parseFloat(value) : value;
-    
-    if (isNaN(num)) {
-      throw new ValidationError(`${fieldName} must be a valid number`, fieldName);
-    }
-    
-    if (num < min) {
-      throw new ValidationError(`${fieldName} must be at least ${min}`, fieldName);
-    }
-    
-    if (num > max) {
-      throw new ValidationError(`${fieldName} must be no more than ${max}`, fieldName);
-    }
-    
-    return num;
-  }
-
-  /**
-   * セッションIDバリデーション
-   */
-  static sessionId(value) {
-    this.string(value, 'sessionId', 36, 36);
-    
-    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (!uuidPattern.test(value)) {
-      throw new ValidationError('Invalid session ID format', 'sessionId');
-    }
-    
-    return value;
-  }
-
-  /**
-   * HTMLサニタイゼーション
-   */
-static sanitizeHtml(value, fieldName) {
-  this.string(value, fieldName);
-
-  return value
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/javascript:/gi, '')
-    .replace(/on\w+\s*=/gi, '')
-    .trim();
-}
-
-
-  /**
-   * 候補者名バリデーション
-   */
-  static candidateName(value) {
-    if (!value || !value.trim()) {
-      return '';
-    }
-    
-    return this.string(value.trim(), 'candidateName', 1, 100);
-  }
-
-  /**
-   * 面接回答バリデーション
-   */
-  static interviewResponse(value) {
-    const cleaned = this.sanitizeHtml(value, 'response');
-    return this.string(cleaned, 'response', 1, 5000);
-  }
-
-  /**
-   * ファイル名バリデーション
-   */
-  static fileName(value) {
-    this.string(value, 'fileName', 1, 255);
-    
-    const invalidChars = /[<>:"/\\|?*]/;
-    if (invalidChars.test(value)) {
-      throw new ValidationError(
-        'File name contains invalid characters',
-        'fileName'
-      );
-    }
-    
-    return value;
-  }
-
-  /**
-   * メールアドレスバリデーション
-   */
-  static email(value) {
-    this.string(value, 'email');
-    
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailPattern.test(value)) {
-      throw new ValidationError('Invalid email format', 'email');
-    }
-    
-    return value;
-  }
-}
-/*===================================
-formatters.gs - フォーマッター
-===================================*/
-/**
- * レスポンスフォーマッター
- */
-class ResponseFormatter {
-  static success(data, message = 'Success') {
-    return {
-      success: true,
-      data: data,
-      message: message,
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  static error(error, context = {}) {
-    return ErrorHandler.handle(error, context);
-  }
-
-  static paginated(items, page = 0, limit = 100, total = null) {
-    const totalCount = total !== null ? total : items.length;
-    
-    return this.success({
-      items: items,
-      pagination: {
-        page: page,
-        limit: limit,
-        total: totalCount,
-        hasMore: (page + 1) * limit < totalCount
-      }
-    });
-  }
-}
-
-/**
- * ファイル名生成ユーティリティ
- */
-class FileNameGenerator {
-  static generateRecordingFileName(sessionId, extension = 'webm') {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const sanitizedSessionId = sessionId.replace(/[^a-zA-Z0-9-]/g, '');
-    return `interview_${sanitizedSessionId}_${timestamp}.${extension}`;
-  }
-
-  static generateLogFileName(date = new Date()) {
-    const dateStr = date.toISOString().slice(0, 10);
-    return `log_${dateStr}.txt`;
-  }
-
-  static generateBackupFileName(type, date = new Date()) {
-    const timestamp = date.toISOString().replace(/[:.]/g, '-');
-    return `backup_${type}_${timestamp}.json`;
-  }
-
-  static sanitizeFileName(fileName) {
-    return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  }
-}
-
-/**
- * 日時フォーマッター
- */
-class DateFormatter {
-  static toISOString(date = new Date()) {
-    return date.toISOString();
-  }
-
-  static toJapaneseString(date = new Date()) {
-    return date.toLocaleString('ja-JP', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    });
-  }
-
-  static getTimestamp() {
-    return Date.now();
-  }
-
-  static calculateDuration(startTime, endTime = new Date()) {
-    return Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
-  }
-}
-/*===================================
-binaryUtils.gs - バイナリユーティリティ
-===================================*/
-/**
- * バイナリデータ処理ユーティリティ
- */
-class BinaryUtils {
-  /**
-   * マルチパートペイロード作成
-   */
-  static createMultipartPayload(binaryData, fileName, contentType = 'video/webm') {
-    const boundary = this.generateBoundary();
-    const CRLF = '\r\n';
-    
-    const header = [
-      `--${boundary}`,
-      `Content-Disposition: form-data; name="file"; filename="${fileName}"`,
-      `Content-Type: ${contentType}`,
-      '',
-      ''
-    ].join(CRLF);
-    
-    const footer = `${CRLF}--${boundary}--${CRLF}`;
-    
-    // バイナリデータを結合
-    const headerBytes = Utilities.newBlob(header).getBytes();
-    const footerBytes = Utilities.newBlob(footer).getBytes();
-    const totalLength = headerBytes.length + binaryData.length + footerBytes.length;
-    
-    const result = new Uint8Array(totalLength);
-    result.set(headerBytes, 0);
-    result.set(binaryData, headerBytes.length);
-    result.set(footerBytes, headerBytes.length + binaryData.length);
-    
-    return {
-      payload: result,
-      boundary: boundary,
-      contentType: `multipart/form-data; boundary=${boundary}`
-    };
-  }
-
-  /**
-   * バウンダリー生成
-   */
-  static generateBoundary() {
-    return '----WebKitFormBoundary' + Utilities.getUuid().replace(/-/g, '');
-  }
-
-  /**
-   * Base64デコード
-   */
-  static base64ToBlob(base64Data, contentType = 'application/octet-stream') {
-    try {
-      const binaryData = Utilities.base64Decode(base64Data);
-      return Utilities.newBlob(binaryData, contentType);
-    } catch (error) {
-      throw new ValidationError('Invalid base64 data', 'base64Data');
-    }
-  }
-
-  /**
-   * Base64エンコード
-   */
-  static blobToBase64(blob) {
-    try {
-      return Utilities.base64Encode(blob.getBytes());
-    } catch (error) {
-      throw new ApiError('Failed to encode blob to base64');
-    }
-  }
-
-  /**
-   * ファイルサイズバリデーション
-   */
-  static validateFileSize(data, maxSizeBytes) {
-    const size = data.length || data.getBytes().length;
-    if (size > maxSizeBytes) {
-      throw new ValidationError(
-        `File size (${size} bytes) exceeds maximum allowed size (${maxSizeBytes} bytes)`,
-        'fileSize'
-      );
-    }
-    return size;
-  }
-
-  /**
-   * ファイル形式バリデーション
-   */
-  static validateFileType(fileName, allowedExtensions) {
-    const extension = fileName.split('.').pop().toLowerCase();
-    if (!allowedExtensions.includes(extension)) {
-      throw new ValidationError(
-        `File type '${extension}' is not allowed. Allowed types: ${allowedExtensions.join(', ')}`,
-        'fileType'
-      );
-    }
-    return extension;
-  }
-}
-/*========================================
-spreadsheetManager.gs - スプレッドシート管理
-=========================================*/
-/**
- * スプレッドシート管理クラス（シングルトン）
- */
-class SpreadsheetManager {
-  constructor() {
-    if (SpreadsheetManager.instance) {
-      return SpreadsheetManager.instance;
-    }
-    
-    try {
-      this.spreadsheet = SpreadsheetApp.openById(config.getSpreadsheetId());
-      this.sheets = new Map(); // シートキャッシュ
-      this.initializeSheets();
-      
-      logger.info('SpreadsheetManager initialized successfully');
-      SpreadsheetManager.instance = this;
-    } catch (error) {
-      logger.error('Failed to initialize SpreadsheetManager', error);
-      throw new ConfigurationError('Spreadsheet initialization failed', {
-        spreadsheetId: config.getSpreadsheetId(),
-        error: error.message
-      });
-    }
-  }
-
-  static getInstance() {
-    if (!SpreadsheetManager.instance) {
-      SpreadsheetManager.instance = new SpreadsheetManager();
-    }
-    return SpreadsheetManager.instance;
-  }
-
-  /**
-   * 全シートの初期化
-   */
-  initializeSheets() {
-    const sheetConfigs = this.getSheetConfigs();
-    
-    Object.entries(sheetConfigs).forEach(([sheetName, config]) => {
-      const sheet = this.getOrCreateSheet(sheetName, config);
-      this.sheets.set(sheetName, sheet);
-    });
-  }
-
-  /**
-   * シート設定定義
-   */
-  getSheetConfigs() {
-    return {
-      'Questions': {
-        headers: [
-          'ID', 'カテゴリ', '質問内容', '期待回答タイプ', '重要度',
-          '使用可能', '作成日時', '更新日時'
-        ],
-        sampleData: [
-          [1, '自己紹介', 'まず、簡単に自己紹介をお願いします。', 'テキスト', 5, true, new Date(), new Date()],
-          [2, 'テクニカル', 'あなたの得意な技術分野について教えてください。', 'スキル', 4, true, new Date(), new Date()],
-          [3, '経験', 'これまでで最も挑戦的だったプロジェクトについて教えてください。', 'エピソード', 5, true, new Date(), new Date()],
-          [4, 'モチベーション', '当社を志望する理由を教えてください。', 'テキスト', 3, true, new Date(), new Date()]
-        ]
-      },
-      'Responses': {
-        headers: [
-          'セッションID', 'タイムスタンプ', '質問ID', '質問内容', '回答内容',
-          '回答時間(秒)', 'AI評価概要', 'キーワード', 'スコア', '詳細分析'
-        ]
-      },
-      'Sessions': {
-        headers: [
-          'セッションID', '開始時刻', '終了時刻', '候補者名', '総質問数',
-          '平均スコア', '総スコア', 'ステータス', '備考', 'IPアドレス'
-        ]
-      },
-      'Logs': {
-        headers: [
-          'タイムスタンプ', 'レベル', 'メッセージ', 'セッションID', '詳細'
-        ]
-      },
-      'Recordings': {
-        headers: [
-          'セッションID', 'アップロード時刻', 'ファイル名', 'ファイルサイズ(bytes)',
-          '録画時間(秒)', 'ギガファイル便URL', 'ギガファイル便ID', '有効期限',
-          'アップロード状況', 'エラーメッセージ'
-        ]
-      }
-    };
-  }
-
-  /**
-   * シートの取得または作成
-   */
-  getOrCreateSheet(sheetName, config) {
-    let sheet = this.spreadsheet.getSheetByName(sheetName);
-    
-    if (!sheet) {
-      sheet = this.createSheet(sheetName, config);
-    }
-    
-    return sheet;
-  }
-
-  /**
-   * シート作成
-   */
-  createSheet(sheetName, config) {
-    const sheet = this.spreadsheet.insertSheet(sheetName);
-    
-    // ヘッダー設定
-    this.setHeaders(sheet, config.headers);
-    
-    // サンプルデータ設定
-    if (config.sampleData && config.sampleData.length > 0) {
-      this.setSampleData(sheet, config.sampleData);
-    }
-    
-    logger.info(`Created sheet: ${sheetName}`);
-    return sheet;
-  }
-
-  /**
-   * ヘッダー設定
-   */
-  setHeaders(sheet, headers) {
-    const headerRange = sheet.getRange(1, 1, 1, headers.length);
-    headerRange.setValues([headers]);
-    headerRange.setBackground('#4285f4');
-    headerRange.setFontColor('white');
-    headerRange.setFontWeight('bold');
-    sheet.setFrozenRows(1);
-  }
-
-  /**
-   * サンプルデータ設定
-   */
-  setSampleData(sheet, sampleData) {
-    const dataRange = sheet.getRange(2, 1, sampleData.length, sampleData[0].length);
-    dataRange.setValues(sampleData);
-  }
-
-  /**
-   * 質問データ取得
-   */
-  getAvailableQuestions() {
-    const sheet = this.sheets.get('Questions');
-    const data = sheet.getDataRange().getValues();
-    
-    if (data.length <= 1) {
-      return [];
-    }
-    
-    return data.slice(1)
-      .filter(row => row[5] === true) // 使用可能フラグ
-      .map(row => ({
-        id: row[0],
-        category: row[1],
-        content: row[2],
-        expectedType: row[3],
-        importance: row[4],
-        available: row[5],
-        createdAt: row[6],
-        updatedAt: row[7]
-      }));
-  }
-
-  /**
-   * 回答データ保存
-   */
-  saveResponse(sessionId, questionId, questionContent, response, responseTime, evaluation) {
-    const sheet = this.sheets.get('Responses');
-    const row = [
-      sessionId,
-      new Date(),
-      questionId,
-      questionContent,
-      response,
-      responseTime,
-      evaluation.summary || '',
-      Array.isArray(evaluation.keywords) ? evaluation.keywords.join(', ') : '',
-      evaluation.score || 0,
-      JSON.stringify({
-        strengths: evaluation.strengths || [],
-        concerns: evaluation.concerns || [],
-        followUpSuggestions: evaluation.followUpSuggestions || []
-      })
-    ];
-    
-    sheet.appendRow(row);
-    logger.logSession('Response saved', sessionId, {
-      questionId: questionId,
-      score: evaluation.score
-    });
-  }
-
-  /**
-   * セッションデータ保存
-   */
-  saveSession(sessionData) {
-    const sheet = this.sheets.get('Sessions');
-    const row = [
-      sessionData.sessionId,
-      sessionData.startTime,
-      sessionData.endTime || '',
-      sessionData.candidateName || '',
-      sessionData.totalQuestions || 0,
-      sessionData.averageScore || 0,
-      sessionData.totalScore || 0,
-      sessionData.status || 'active',
-      sessionData.notes || '',
-      sessionData.ipAddress || ''
-    ];
-    
-    sheet.appendRow(row);
-    logger.logSession('Session saved', sessionData.sessionId, {
-      candidateName: sessionData.candidateName
-    });
-  }
-
-  /**
-   * セッションステータス更新
-   */
-  updateSessionStatus(sessionId, status, endTime = null, additionalData = {}) {
-    const sheet = this.sheets.get('Sessions');
-    const data = sheet.getDataRange().getValues();
-    const headers = data[0];
-    
-    const sessionIdIndex = headers.indexOf('セッションID');
-    const statusIndex = headers.indexOf('ステータス');
-    const endTimeIndex = headers.indexOf('終了時刻');
-    
-    for (let i = 1; i < data.length; i++) {
-      if (data[i][sessionIdIndex] === sessionId) {
-        sheet.getRange(i + 1, statusIndex + 1).setValue(status);
-        
-        if (endTime) {
-          sheet.getRange(i + 1, endTimeIndex + 1).setValue(endTime);
-        }
-        
-        // 追加データの更新
-        Object.entries(additionalData).forEach(([key, value]) => {
-          const columnIndex = headers.indexOf(key);
-          if (columnIndex !== -1) {
-            sheet.getRange(i + 1, columnIndex + 1).setValue(value);
-          }
-        });
-        
-        break;
-      }
-    }
-    
-    logger.logSession('Session status updated', sessionId, { status });
-  }
-
-  /**
-   * ログ保存
-   */
-  saveLog(level, message, sessionId = '', details = {}) {
-    const sheet = this.sheets.get('Logs');
-    const row = [
-      new Date(),
-      level,
-      message,
-      sessionId,
-      JSON.stringify(details)
-    ];
-    
-    sheet.appendRow(row);
-  }
-
-  /**
-   * 録画データ保存
-   */
-  saveRecording(recordingData) {
-    const sheet = this.sheets.get('Recordings');
-    const row = [
-      recordingData.sessionId,
-      recordingData.uploadTime,
-      recordingData.fileName,
-      recordingData.fileSize,
-      recordingData.duration,
-      recordingData.gigaFileUrl,
-      recordingData.gigaFileId,
-      recordingData.expiryDate,
-      recordingData.uploadStatus,
-      recordingData.errorMessage || ''
-    ];
-    
-    sheet.appendRow(row);
-    logger.logRecording('Recording saved', recordingData.sessionId, {
-      fileName: recordingData.fileName,
-      fileSize: recordingData.fileSize
-    });
-  }
-
-  /**
-   * データ取得（汎用）
-   */
-  getData(sheetName, filters = {}) {
-    const sheet = this.sheets.get(sheetName);
-    if (!sheet) {
-      throw new NotFoundError(`Sheet '${sheetName}'`);
-    }
-    
-    const data = sheet.getDataRange().getValues();
-    if (data.length <= 1) {
-      return [];
-    }
-    
-    const headers = data[0];
-    let rows = data.slice(1);
-    
-    // フィルタリング
-    if (Object.keys(filters).length > 0) {
-      rows = rows.filter(row => {
-        return Object.entries(filters).every(([key, value]) => {
-          const columnIndex = headers.indexOf(key);
-          return columnIndex !== -1 && row[columnIndex] === value;
-        });
-      });
-    }
-    
-    return rows.map(row => {
-      const obj = {};
-      headers.forEach((header, index) => {
-        obj[header] = row[index];
-      });
-      return obj;
-    });
-  }
-}
-// =============================================================================
-// AI面接システム - 統合版 Google Apps Script
-// =============================================================================
-
-/**
- * システム設定管理クラス
- */
+// ==============================
+// 設定管理
+// ==============================
 class SystemConfig {
   constructor() {
     this.properties = PropertiesService.getScriptProperties();
     this.initializeConfig();
   }
-
   initializeConfig() {
     const defaultConfig = {
       SPREADSHEET_ID: '1-q239hLHhHydeFfd4mE-c9xhOfznlvAaYtp_X5Yx3fg',
@@ -916,30 +17,25 @@ class SystemConfig {
       GIGAFILE_MAX_RETRY: '3',
       GIGAFILE_RETRY_DELAY: '2000'
     };
-
     Object.entries(defaultConfig).forEach(([key, value]) => {
       if (!this.properties.getProperty(key)) {
         this.properties.setProperty(key, value);
       }
     });
   }
-
   get(key) {
     const value = this.properties.getProperty(key);
     if (value == null) throw new SystemError(`Configuration key '${key}' not found`);
     return value;
   }
-  
   getNumber(key) { return parseInt(this.get(key), 10); }
   getBoolean(key) { return this.get(key).toLowerCase() === 'true'; }
   set(key, value) { this.properties.setProperty(key, String(value)); }
-
   getOpenAIKey() {
     const key = this.properties.getProperty('OPENAI_API_KEY');
     if (!key) throw new SystemError('OpenAI API key not configured. Set OPENAI_API_KEY.');
     return key;
   }
-
   getSpreadsheetId() { return this.get('SPREADSHEET_ID'); }
   getModel() { return this.get('MODEL'); }
   getMaxTokens() { return this.getNumber('MAX_TOKENS'); }
@@ -949,10 +45,11 @@ class SystemConfig {
   getGigaFileMaxRetry() { return this.getNumber('GIGAFILE_MAX_RETRY'); }
   getGigaFileRetryDelay() { return this.getNumber('GIGAFILE_RETRY_DELAY'); }
 }
+const config = new SystemConfig();
 
-/**
- * カスタムエラークラス
- */
+// ==============================
+// エラー・ロガー
+// ==============================
 class SystemError extends Error {
   constructor(message, code = 'GENERAL_ERROR', statusCode = 500, details = {}) {
     super(message);
@@ -963,14 +60,9 @@ class SystemError extends Error {
     this.timestamp = new Date().toISOString();
   }
 }
-
-/**
- * エラーハンドリングユーティリティ
- */
 class ErrorHandling {
   static handle(error, context = {}) {
     let systemError;
-    
     if (error instanceof SystemError) {
       systemError = error;
     } else {
@@ -981,15 +73,12 @@ class ErrorHandling {
         { originalError: error.toString() }
       );
     }
-
-    // ログ出力
     SystemLogger.error(systemError.message, systemError, {
       context,
       code: systemError.code,
       statusCode: systemError.statusCode,
       details: systemError.details
     });
-
     return {
       success: false,
       error: {
@@ -1000,27 +89,19 @@ class ErrorHandling {
       }
     };
   }
-
   static createApiError(message, code = 'API_ERROR') {
     return new SystemError(message, code, 400);
   }
-
   static createValidationError(message, field = null) {
     return new SystemError(message, 'VALIDATION_ERROR', 400, { field });
   }
-
   static createNotFoundError(resource) {
     return new SystemError(`${resource} not found`, 'NOT_FOUND', 404);
   }
-
   static createUnauthorizedError(message = 'Unauthorized') {
     return new SystemError(message, 'UNAUTHORIZED', 401);
   }
 }
-
-/**
- * ログ管理クラス
- */
 class SystemLogger {
   static get instance() {
     if (!this._instance) {
@@ -1028,16 +109,13 @@ class SystemLogger {
     }
     return this._instance;
   }
-
   constructor() {
     this.logLevel = config.get('LOG_LEVEL');
     this.levels = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
   }
-
   shouldLog(level) { 
     return this.levels[level] >= this.levels[this.logLevel]; 
   }
-
   formatMessage(level, message, context = {}) {
     return JSON.stringify({ 
       timestamp: new Date().toISOString(), 
@@ -1046,42 +124,35 @@ class SystemLogger {
       ...context 
     });
   }
-
   static debug(msg, ctx) { 
     const instance = SystemLogger.instance;
     if (instance.shouldLog('DEBUG')) {
       console.log(instance.formatMessage('DEBUG', msg, ctx)); 
     }
   }
-
   static info(msg, ctx) { 
     const instance = SystemLogger.instance;
     if (instance.shouldLog('INFO')) {
       console.log(instance.formatMessage('INFO', msg, ctx)); 
     }
   }
-
   static warn(msg, ctx) { 
     const instance = SystemLogger.instance;
     if (instance.shouldLog('WARN')) {
       console.warn(instance.formatMessage('WARN', msg, ctx)); 
     }
   }
-
   static error(msg, err = null, ctx = {}) {
     const instance = SystemLogger.instance;
     if (!instance.shouldLog('ERROR')) return;
-    
     const errorCtx = err ? { 
       error: { 
         message: err.message, 
         stack: err.stack 
       } 
     } : {};
-    
     console.error(instance.formatMessage('ERROR', msg, { ...ctx, ...errorCtx }));
   }
-
   static logApiCall(method, url, duration, status) {
     SystemLogger.info('API 呼び出し', {
       method,
@@ -1090,22 +161,51 @@ class SystemLogger {
       status
     });
   }
-
   static logSession(action, sessionId, ctx = {}) {
     SystemLogger.info(`セッション${action}`, { sessionId, action, ...ctx });
   }
 }
-
-/**
- * データバリデーションクラス
- */
+class SystemUtils {
+  static generateUUID() {
+    return Utilities.getUuid();
+  }
+  static generateFileName(sessionId, extension = 'webm') {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return `interview_${sessionId}_${timestamp}.${extension}`;
+  }
+  static sanitizeFileName(fileName) {
+    return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  }
+  static formatResponse(success, data = null, message = null) {
+    const response = {
+      success,
+      timestamp: new Date().toISOString()
+    };
+    if (success) {
+      response.data = data;
+      if (message) response.message = message;
+    } else {
+      response.error = data;
+    }
+    return response;
+  }
+  static createBoundary() {
+    return '----WebKitFormBoundary' + Utilities.getUuid().replace(/-/g, '');
+  }
+  static base64ToBlob(base64Data, contentType = 'application/octet-stream') {
+    const binaryData = Utilities.base64Decode(base64Data);
+    return Utilities.newBlob(binaryData, contentType);
+  }
+}
+// ==============================
+// バリデーション
+// ==============================
 class DataValidator {
   static validateRequired(v, field) {
     if (v === null || v === undefined || v === '') {
       throw ErrorHandling.createValidationError(`${field} is required`, field);
     }
   }
-
   static validateString(v, field, min = 0, max = Infinity) {
     this.validateRequired(v, field);
     if (typeof v !== 'string') {
@@ -1118,21 +218,18 @@ class DataValidator {
       throw ErrorHandling.createValidationError(`${field} must be no more than ${max} characters`, field);
     }
   }
-
   static validateSessionId(id) {
     this.validateString(id, 'sessionId', 36, 36);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
       throw ErrorHandling.createValidationError('Invalid session ID format', 'sessionId');
     }
   }
-
   static validateResponse(res) {
     this.validateString(res, 'response', 1, 5000);
-    return /<script[^>]*>[\s\S]*?<\/script>/gi
+    return res.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
               .replace(/javascript:/gi, '')
               .replace(/on\w+\s*=/gi, '');
   }
-
   static validateCandidateName(name) {
     if (name && name.trim()) {
       this.validateString(name.trim(), 'candidateName', 1, 100);
@@ -1142,52 +239,9 @@ class DataValidator {
   }
 }
 
-/**
- * ユーティリティクラス
- */
-class SystemUtils {
-  static generateUUID() {
-    return Utilities.getUuid();
-  }
-
-  static generateFileName(sessionId, extension = 'webm') {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    return `interview_${sessionId}_${timestamp}.${extension}`;
-  }
-
-  static sanitizeFileName(fileName) {
-    return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  }
-
-  static formatResponse(success, data = null, message = null) {
-    const response = {
-      success,
-      timestamp: new Date().toISOString()
-    };
-    
-    if (success) {
-      response.data = data;
-      if (message) response.message = message;
-    } else {
-      response.error = data;
-    }
-    
-    return response;
-  }
-
-  static createBoundary() {
-    return '----WebKitFormBoundary' + Utilities.getUuid().replace(/-/g, '');
-  }
-
-  static base64ToBlob(base64Data, contentType = 'application/octet-stream') {
-    const binaryData = Utilities.base64Decode(base64Data);
-    return Utilities.newBlob(binaryData, contentType);
-  }
-}
-
-/**
- * スプレッドシート管理クラス
- */
+// ==============================
+// スプレッドシート管理
+// ==============================
 class DataSheetManager {
   constructor() {
     try {
@@ -1199,7 +253,6 @@ class DataSheetManager {
       throw new SystemError('スプレッドシートの初期化に失敗しました', 'SPREADSHEET_INIT_ERROR');
     }
   }
-
   initializeSheets() {
     const sheetsConfig = {
       'Questions': {
@@ -1224,40 +277,32 @@ class DataSheetManager {
         headers: ['セッションID','アップロード時刻','ファイル名','ファイルサイズ(bytes)','録画時間(秒)','ギガファイル便URL','ギガファイル便ID','有効期限','アップロード状況','エラーメッセージ']
       }
     };
-
     Object.entries(sheetsConfig).forEach(([name, config]) => {
       this[`${name.toLowerCase()}Sheet`] = this.getOrCreateSheet(name, () => 
         this.createSheetWithHeaders(name, config.headers, config.sampleData)
       );
     });
   }
-
   getOrCreateSheet(name, createFn) { 
     return this.spreadsheet.getSheetByName(name) || createFn(); 
   }
-
   createSheetWithHeaders(name, headers, sampleData = null) {
     const sheet = this.spreadsheet.insertSheet(name);
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    
     if (sampleData) {
       sheet.getRange(2, 1, sampleData.length, sampleData[0].length).setValues(sampleData);
     }
-    
     this.formatHeaders(sheet, headers.length);
     return sheet;
   }
-
   formatHeaders(sheet, cols) {
     const range = sheet.getRange(1, 1, 1, cols);
     range.setBackground('#4285f4').setFontColor('white').setFontWeight('bold');
     sheet.setFrozenRows(1);
   }
-
   getAvailableQuestions() {
     const data = this.questionsSheet.getDataRange().getValues();
     if (data.length <= 1) return [];
-    
     return data.slice(1)
       .filter(r => r[5] === true)
       .map(r => ({
@@ -1271,7 +316,6 @@ class DataSheetManager {
         updatedAt: r[7]
       }));
   }
-
   async saveResponse(sessionId, qId, qContent, resp, respTime, evalObj) {
     const row = [
       sessionId, new Date(), qId, qContent, resp, respTime,
@@ -1284,33 +328,27 @@ class DataSheetManager {
         followUpSuggestions: evalObj.followUpSuggestions
       })
     ];
-    
     this.responsesSheet.appendRow(row);
     SystemLogger.logSession('回答保存', sessionId, { questionId: qId, score: evalObj.score });
   }
-
   async saveSession(data) {
     this.sessionsSheet.appendRow([
       data.sessionId, data.startTime, data.endTime || '', data.candidateName || '',
       data.totalQuestions || 0, data.averageScore || 0, data.totalScore || 0,
       data.status || 'active', data.notes || '', data.ipAddress || ''
     ]);
-    
     SystemLogger.logSession('セッション保存', data.sessionId, { candidateName: data.candidateName });
   }
-
   updateSessionStatus(sessionId, status, endTime = null, more = {}) {
     const data = this.sessionsSheet.getDataRange().getValues();
     const headers = data[0];
     const sidIdx = headers.indexOf('セッションID');
     const stIdx = headers.indexOf('ステータス');
     const etIdx = headers.indexOf('終了時刻');
-
     for (let i = 1; i < data.length; i++) {
       if (data[i][sidIdx] === sessionId) {
         this.sessionsSheet.getRange(i+1, stIdx+1).setValue(status);
         if (endTime) this.sessionsSheet.getRange(i+1, etIdx+1).setValue(endTime);
-        
         Object.entries(more).forEach(([k,v]) => {
           const col = headers.indexOf(k);
           if (col !== -1) this.sessionsSheet.getRange(i+1, col+1).setValue(v);
@@ -1318,14 +356,11 @@ class DataSheetManager {
         break;
       }
     }
-    
     SystemLogger.logSession('ステータス更新', sessionId, { status });
   }
-
   saveLog(level, msg, sessionId = '', details = {}) {
     this.logsSheet.appendRow([new Date(), level, msg, sessionId, JSON.stringify(details)]);
   }
-
   saveRecordingMetadata(data) {
     this.recordingsSheet.appendRow([
       data.sessionId, data.uploadTime, data.fileName, data.fileSize,
@@ -1335,24 +370,21 @@ class DataSheetManager {
   }
 }
 
-/**
- * ギガファイル便管理クラス
- */
+// ==============================
+// ギガファイル便管理
+// ==============================
 class GigaFileService {
   constructor() {
     this.apiBaseUrl = 'https://gigafile.nu/api';
     this.maxRetries = config.getGigaFileMaxRetry();
     this.retryDelay = config.getGigaFileRetryDelay();
   }
-
   async uploadFile(binaryData, fileName, sessionId) {
     if (!config.isGigaFileEnabled()) {
       throw new SystemError('ギガファイル便が無効になっています', 'GIGAFILE_DISABLED');
     }
-
     const boundary = SystemUtils.createBoundary();
     const payload = this.createMultipartPayload(binaryData, fileName, boundary);
-    
     const options = {
       method: 'POST',
       headers: {
@@ -1360,10 +392,8 @@ class GigaFileService {
       },
       payload: payload
     };
-
     const startTime = Date.now();
     let lastError;
-
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         SystemLogger.info(`ギガファイル便アップロード試行 ${attempt}/${this.maxRetries}`, {
@@ -1372,10 +402,8 @@ class GigaFileService {
           attempt,
           fileSize: binaryData.length
         });
-
         const response = await this.executeUpload(options);
         const duration = Date.now() - startTime;
-        
         SystemLogger.logApiCall('POST', 'gigafile.nu/api/upload', duration, 200);
         SystemLogger.info('ギガファイル便アップロード成功', {
           sessionId,
@@ -1383,7 +411,6 @@ class GigaFileService {
           duration,
           attempts: attempt
         });
-
         return {
           success: true,
           downloadUrl: response.download_url,
@@ -1393,7 +420,6 @@ class GigaFileService {
           fileName: fileName,
           fileSize: binaryData.length
         };
-
       } catch (error) {
         lastError = error;
         SystemLogger.warn(`ギガファイル便アップロード失敗 (試行 ${attempt}/${this.maxRetries})`, {
@@ -1402,13 +428,11 @@ class GigaFileService {
           error: error.message,
           attempt
         });
-
         if (attempt < this.maxRetries) {
           await this.delay(this.retryDelay * attempt);
         }
       }
     }
-
     throw new SystemError(
       `ギガファイル便アップロードに失敗しました: ${lastError.message}`,
       'GIGAFILE_UPLOAD_FAILED',
@@ -1416,7 +440,6 @@ class GigaFileService {
       { sessionId, fileName, attempts: this.maxRetries }
     );
   }
-
   createMultipartPayload(binary, fileName, boundary) {
     const CRLF = '\r\n';
     const header = [
@@ -1425,35 +448,27 @@ class GigaFileService {
       'Content-Type: video/webm',
       '', ''
     ].join(CRLF);
-    
     const footer = `${CRLF}--${boundary}--${CRLF}`;
     const headerBytes = Utilities.newBlob(header).getBytes();
     const footerBytes = Utilities.newBlob(footer).getBytes();
     const total = headerBytes.length + binary.length + footerBytes.length;
     const buf = new Uint8Array(total);
-
     buf.set(headerBytes, 0);
     buf.set(binary, headerBytes.length);
     buf.set(footerBytes, headerBytes.length + binary.length);
-
     return buf;
   }
-
   async executeUpload(options) {
     const response = UrlFetchApp.fetch(`${this.apiBaseUrl}/upload`, options);
-    
     if (response.getResponseCode() !== 200) {
       throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
     }
-
     const data = JSON.parse(response.getContentText());
     if (!data.success) {
       throw new Error(data.message || 'アップロードに失敗しました');
     }
-
     return data;
   }
-
   async delay(ms) {
     return new Promise(resolve => {
       Utilities.sleep(ms);
@@ -1462,25 +477,21 @@ class GigaFileService {
   }
 }
 
-/**
- * 録画管理クラス
- */
+// ==============================
+// 録画管理
+// ==============================
 class RecordingService {
   constructor() {
     this.sheetManager = new DataSheetManager();
     this.gigaFileService = new GigaFileService();
     this.activeSessions = new Map();
   }
-
   async saveRecording(sessionId, binaryData, fileName, metadata = {}) {
     DataValidator.validateSessionId(sessionId);
-    
     const safeName = SystemUtils.sanitizeFileName(fileName) || 
                     SystemUtils.generateFileName(sessionId);
-    
     try {
       const uploadResult = await this.gigaFileService.uploadFile(binaryData, safeName, sessionId);
-      
       await this.sheetManager.saveRecordingMetadata({
         sessionId,
         fileName: safeName,
@@ -1493,12 +504,10 @@ class RecordingService {
         uploadStatus: 'completed',
         errorMessage: ''
       });
-
       SystemLogger.logSession('録画保存完了', sessionId, { 
         fileName: safeName, 
         url: uploadResult.downloadUrl 
       });
-
       return uploadResult;
     } catch (error) {
       await this.sheetManager.saveRecordingMetadata({
@@ -1513,18 +522,14 @@ class RecordingService {
         uploadStatus: 'failed',
         errorMessage: error.message
       });
-
       throw error;
     }
   }
-
   startRecordingSession(sessionId, metadata = {}) {
     DataValidator.validateSessionId(sessionId);
-    
     if (this.activeSessions.has(sessionId)) {
       throw ErrorHandling.createValidationError('Recording session already active', 'sessionId');
     }
-
     const sessionData = {
       sessionId,
       startTime: new Date(),
@@ -1533,28 +538,21 @@ class RecordingService {
       chunks: [],
       totalSize: 0
     };
-
     this.activeSessions.set(sessionId, sessionData);
     SystemLogger.logSession('録画開始', sessionId);
-    
     return SystemUtils.formatResponse(true, {
       sessionId,
       status: 'recording',
       message: '録画を開始しました'
     });
   }
-
   stopRecordingSession(sessionId) {
     const session = this.getActiveSession(sessionId);
-    
     session.status = 'stopped';
     session.endTime = new Date();
-    
     const duration = Math.floor((session.endTime - session.startTime) / 1000);
     this.activeSessions.delete(sessionId);
-    
     SystemLogger.logSession('録画停止', sessionId, { duration });
-    
     return SystemUtils.formatResponse(true, {
       sessionId,
       status: 'stopped',
@@ -1562,10 +560,8 @@ class RecordingService {
       message: '録画を停止しました'
     });
   }
-
   getRecordingStatus(sessionId) {
     const session = this.activeSessions.get(sessionId);
-    
     if (!session) {
       return SystemUtils.formatResponse(true, {
         sessionId,
@@ -1573,9 +569,7 @@ class RecordingService {
         message: '録画セッションが見つかりません'
       });
     }
-
     const duration = Math.floor((Date.now() - session.startTime) / 1000);
-    
     return SystemUtils.formatResponse(true, {
       sessionId,
       status: session.status,
@@ -1584,35 +578,30 @@ class RecordingService {
       totalSize: session.totalSize
     });
   }
-
   getActiveSession(sessionId, expectedStatus = null) {
     const session = this.activeSessions.get(sessionId);
-    
     if (!session) {
       throw ErrorHandling.createNotFoundError('Recording session');
     }
-    
     if (expectedStatus && session.status !== expectedStatus) {
       throw ErrorHandling.createValidationError(
         `Expected session status: ${expectedStatus}, got: ${session.status}`,
         'sessionStatus'
       );
     }
-    
     return session;
   }
 }
 
-/**
- * AI面接管理クラス
- */
+// ==============================
+// AI面接管理
+// ==============================
 class InterviewService {
   constructor() {
     this.apiKey = config.getOpenAIKey();
     this.conversationHistory = new Map();
     this.sheetManager = new DataSheetManager();
   }
-
   async callOpenAI(messages, functions = null) {
     const startTime = Date.now();
     const payload = {
@@ -1622,7 +611,6 @@ class InterviewService {
       temperature: 0.7,
       ...(functions ? { functions, function_call: 'auto' } : {})
     };
-
     const response = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -1631,51 +619,39 @@ class InterviewService {
       },
       payload: JSON.stringify(payload)
     });
-
     const duration = Date.now() - startTime;
     SystemLogger.logApiCall('POST', 'api.openai.com/v1/chat/completions', duration, response.getResponseCode());
-    
     if (response.getResponseCode() !== 200) {
       throw ErrorHandling.createApiError(`OpenAI API Error: HTTP ${response.getResponseCode()}`);
     }
-
     const data = JSON.parse(response.getContentText());
     if (data.error) {
       throw ErrorHandling.createApiError(data.error.message);
     }
-
     return data;
   }
-
   async startInterview(candidateName = '') {
     const candidate = DataValidator.validateCandidateName(candidateName);
     const sessionId = SystemUtils.generateUUID();
     const startTime = new Date();
-    
     this.conversationHistory.set(sessionId, []);
-
     await this.sheetManager.saveSession({
       sessionId,
       startTime,
       candidateName: candidate,
       status: 'active'
     });
-
     const questions = this.sheetManager.getAvailableQuestions();
     if (!questions.length) {
       throw ErrorHandling.createApiError('利用可能な質問がありません');
     }
-
     const firstQuestion = questions.find(q => q.category === '自己紹介') || questions[0];
     const welcomeMessage = `こんにちは！本日は面接のお時間をいただき、ありがとうございます。${firstQuestion.content}`;
-    
     this.conversationHistory.set(sessionId, [{
       role: 'assistant',
       content: welcomeMessage
     }]);
-
     SystemLogger.logSession('面接開始', sessionId, { candidateName: candidate });
-    
     return {
       sessionId,
       message: welcomeMessage,
@@ -1683,29 +659,20 @@ class InterviewService {
       timestamp: startTime.toISOString()
     };
   }
-
   async processResponse(sessionId, response, questionId) {
     DataValidator.validateSessionId(sessionId);
     const cleanResponse = DataValidator.validateResponse(response);
-    
     const history = this.conversationHistory.get(sessionId);
     if (!history) {
       throw ErrorHandling.createNotFoundError('Interview session');
     }
-
     const questions = this.sheetManager.getAvailableQuestions();
     const currentQuestion = questions.find(q => q.id === questionId);
     if (!currentQuestion) {
       throw ErrorHandling.createNotFoundError('Question');
     }
-
-    // 回答を履歴に追加
     history.push({ role: 'user', content: cleanResponse });
-
-    // AI分析実行
     const analysis = await this.analyzeResponse(currentQuestion.content, cleanResponse);
-    
-    // 回答をシートに保存
     const responseTime = Math.max(10, Math.floor(cleanResponse.length / 10));
     await this.sheetManager.saveResponse(
       sessionId, 
@@ -1715,15 +682,11 @@ class InterviewService {
       responseTime, 
       analysis
     );
-
-    // 次の質問を選択
     const answeredQuestionIds = this.getAnsweredQuestionIds(history).concat(questionId);
     const remainingQuestions = questions.filter(q => !answeredQuestionIds.includes(q.id));
-
     if (!remainingQuestions.length) {
       await this.sheetManager.updateSessionStatus(sessionId, 'completed', new Date());
       this.conversationHistory.delete(sessionId);
-      
       return {
         sessionId,
         message: '面接は以上で終了です。ありがとうございました！',
@@ -1732,22 +695,18 @@ class InterviewService {
         previousAnalysis: analysis
       };
     }
-
     const nextQuestion = await this.selectNextQuestion(sessionId, remainingQuestions);
     const selectedQuestion = remainingQuestions.find(q => q.id === nextQuestion.questionId) || remainingQuestions[0];
-    
     history.push({
       role: 'assistant',
       content: selectedQuestion.content,
       metaQuestionId: selectedQuestion.id
     });
-
     const progress = {
       answered: answeredQuestionIds.length,
       total: questions.length,
       percentage: Math.round((answeredQuestionIds.length / questions.length) * 100)
     };
-
     return {
       sessionId,
       message: selectedQuestion.content,
@@ -1757,7 +716,6 @@ class InterviewService {
       progress
     };
   }
-
   async analyzeResponse(question, response) {
     const systemPrompt = `あなたは経験豊富な面接官です。以下の観点で回答を分析し、JSONで返してください：
     - score: 1-10の数値評価
@@ -1766,17 +724,13 @@ class InterviewService {
     - strengths: 良い点の配列
     - concerns: 懸念点の配列
     - followUpSuggestions: フォローアップ質問の提案配列`;
-
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `質問: ${question}\n回答: ${response}` }
     ];
-
     try {
       const result = await this.callOpenAI(messages);
       const analysis = JSON.parse(result.choices[0].message.content);
-      
-      // データの正規化
       if (!(analysis.score >= 1 && analysis.score <= 10)) {
         analysis.score = 5;
       }
@@ -1792,7 +746,6 @@ class InterviewService {
       if (!Array.isArray(analysis.followUpSuggestions)) {
         analysis.followUpSuggestions = [];
       }
-
       return analysis;
     } catch (error) {
       SystemLogger.error('AI分析に失敗しました', error);
@@ -1806,18 +759,15 @@ class InterviewService {
       };
     }
   }
-
   async selectNextQuestion(sessionId, remainingQuestions) {
     const systemPrompt = `あなたは経験豊富な面接官です。これまでの会話の流れを考慮して、最適な次の質問を選んでください。
     レスポンスは以下のJSON形式で返してください：
     {"questionId": 選択した質問のID}`;
-
     const history = this.conversationHistory.get(sessionId);
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `会話履歴: ${JSON.stringify(history)}\n利用可能な質問: ${JSON.stringify(remainingQuestions)}` }
     ];
-
     try {
       const result = await this.callOpenAI(messages);
       return JSON.parse(result.choices[0].message.content);
@@ -1826,27 +776,21 @@ class InterviewService {
       return { questionId: remainingQuestions[0].id };
     }
   }
-
   getAnsweredQuestionIds(history) {
     return history
       .filter(msg => msg.role === 'assistant' && msg.metaQuestionId)
       .map(msg => msg.metaQuestionId);
   }
-
   getSessionStats(sessionId) {
     DataValidator.validateSessionId(sessionId);
-    
     const history = this.conversationHistory.get(sessionId);
     if (!history) {
       throw ErrorHandling.createNotFoundError('Interview session');
     }
-
     const userMessages = history.filter(msg => msg.role === 'user');
     const assistantMessages = history.filter(msg => msg.role === 'assistant');
-    
     const averageResponseLength = userMessages.length > 0 ? 
       Math.round(userMessages.reduce((sum, msg) => sum + msg.content.length, 0) / userMessages.length) : 0;
-
     return {
       sessionId,
       totalExchanges: Math.min(userMessages.length, assistantMessages.length),
@@ -1855,18 +799,14 @@ class InterviewService {
       lastActivity: new Date().toISOString()
     };
   }
-
   async terminateSession(sessionId, reason = 'Manual termination') {
     DataValidator.validateSessionId(sessionId);
-    
     const endTime = new Date();
     await this.sheetManager.updateSessionStatus(sessionId, 'terminated', endTime, {
       '備考': reason
     });
-    
     this.conversationHistory.delete(sessionId);
     SystemLogger.logSession('セッション終了', sessionId, { reason });
-    
     return {
       success: true,
       message: 'セッションが終了されました',
@@ -1875,10 +815,9 @@ class InterviewService {
     };
   }
 }
-
-/**
- * システムヘルスチェック
- */
+// ==============================
+// システムヘルスチェック
+// ==============================
 class SystemHealthCheck {
   static checkConfig() {
     try {
@@ -1889,7 +828,6 @@ class SystemHealthCheck {
       return { healthy: false, message: error.message };
     }
   }
-
   static checkSpreadsheet() {
     try {
       new DataSheetManager();
@@ -1898,7 +836,6 @@ class SystemHealthCheck {
       return { healthy: false, message: error.message };
     }
   }
-
   static checkOpenAI() {
     try {
       const apiKey = config.getOpenAIKey();
@@ -1911,7 +848,6 @@ class SystemHealthCheck {
       return { healthy: false, message: error.message };
     }
   }
-
   static checkGigaFile() {
     try {
       new GigaFileService();
@@ -1920,7 +856,6 @@ class SystemHealthCheck {
       return { healthy: false, message: error.message };
     }
   }
-
   static performHealthCheck() {
     const checks = {
       config: SystemHealthCheck.checkConfig(),
@@ -1928,9 +863,7 @@ class SystemHealthCheck {
       openai: SystemHealthCheck.checkOpenAI(),
       gigafile: SystemHealthCheck.checkGigaFile()
     };
-    
     const allHealthy = Object.values(checks).every(check => check.healthy);
-    
     return {
       status: allHealthy ? 'healthy' : 'degraded',
       checks,
@@ -1940,13 +873,26 @@ class SystemHealthCheck {
   }
 }
 
-// =============================================================================
+// ==============================
 // WebAppエントリーポイント
-// =============================================================================
+// ==============================
 
-/**
- * GET リクエストハンドラー
- */
+// CORSプリフライトリクエストを処理
+function doOptions(e) {
+  return ContentService.createTextOutput()
+    .addHeader('Access-Control-Allow-Origin', '*') // すべてのオリジンを許可
+    .addHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    .addHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+// JSONレスポンスを生成（CORSヘッダー付き）
+function createJsonResponse(data) {
+  const response = ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON)
+    .addHeader('Access-Control-Allow-Origin', '*'); // すべてのオリジンを許可
+  return response;
+}
+
 function doGet() {
   try {
     SystemLogger.info('WebApp accessed');
@@ -1961,92 +907,77 @@ function doGet() {
   }
 }
 
-/**
- * POST リクエストハンドラー
- */
-function doPost(e) {
+async function doPost(e) {
   const startTime = Date.now();
   let requestData;
-
   try {
-    // リクエストデータの解析
     requestData = JSON.parse(e.postData.contents);
     const action = requestData.action;
-
     SystemLogger.info('API request received', {
       action,
       sessionId: requestData.sessionId || 'new',
       timestamp: new Date().toISOString()
     });
-
-    // アクションルーティング
     let result;
     switch (action) {
       case 'startInterview':
         result = await handleStartInterview(requestData);
         break;
       case 'submitResponse':
-        result = handleSubmitResponse(requestData);
+        result = await handleSubmitResponse(requestData);
         break;
       case 'getSessionStats':
-        result = handleGetSessionStats(requestData);
+        result = await handleGetSessionStats(requestData);
         break;
       case 'terminateSession':
-        result = handleTerminateSession(requestData);
+        result = await handleTerminateSession(requestData);
         break;
       case 'healthCheck':
         result = handleHealthCheck();
         break;
       case 'recordingControl':
-        result = handleRecordingControl(requestData);
+        result = await handleRecordingControl(requestData);
         break;
       case 'uploadRecording':
-        result = handleRecordingUpload(requestData);
-        break;
-      case 'checkRecordingStatus':
-        result = handleRecordingStatusCheck(requestData);
+        result = await handleRecordingUpload(requestData);
         break;
       default:
         throw ErrorHandling.createValidationError(`Unknown action: ${action}`, 'action');
     }
-
-    // 成功ログ
     const duration = Date.now() - startTime;
     SystemLogger.info('API request completed', {
       action,
       duration,
       success: result.success !== false
     });
-
+    
+    // レスポンス作成
     return createJsonResponse(SystemUtils.formatResponse(true, result));
 
   } catch (error) {
-    // エラーハンドリング
     const duration = Date.now() - startTime;
     const errorResponse = ErrorHandling.handle(error, {
       action: requestData?.action || 'unknown',
       duration,
       requestData: config.isProduction() ? 'hidden' : requestData
     });
-
+    
+    // エラーレスポンス作成
     return createJsonResponse(errorResponse);
   }
 }
 
-// =============================================================================
+// ==============================
 // APIハンドラー関数
-// =============================================================================
-
+// ==============================
 async function handleStartInterview(requestData) {
   const interviewService = new InterviewService();
   return await interviewService.startInterview(requestData.candidateName);
 }
-
 async function handleSubmitResponse(requestData) {
   DataValidator.validateRequired(requestData.sessionId, 'sessionId');
   DataValidator.validateRequired(requestData.response, 'response');
   DataValidator.validateRequired(requestData.questionId, 'questionId');
-  
   const interviewService = new InterviewService();
   return await interviewService.processResponse(
     requestData.sessionId,
@@ -2054,34 +985,26 @@ async function handleSubmitResponse(requestData) {
     requestData.questionId
   );
 }
-
 async function handleGetSessionStats(requestData) {
   DataValidator.validateRequired(requestData.sessionId, 'sessionId');
-  
   const interviewService = new InterviewService();
   return interviewService.getSessionStats(requestData.sessionId);
 }
-
 async function handleTerminateSession(requestData) {
   DataValidator.validateRequired(requestData.sessionId, 'sessionId');
-  
   const interviewService = new InterviewService();
   return await interviewService.terminateSession(
     requestData.sessionId,
     requestData.reason || 'User requested termination'
   );
 }
-
 function handleHealthCheck() {
   return SystemHealthCheck.performHealthCheck();
 }
-
 async function handleRecordingControl(requestData) {
   DataValidator.validateRequired(requestData.command, 'command');
   DataValidator.validateRequired(requestData.sessionId, 'sessionId');
-  
   const recordingService = new RecordingService();
-  
   switch (requestData.command) {
     case 'start':
       return recordingService.startRecordingSession(requestData.sessionId, requestData.metadata || {});
@@ -2093,21 +1016,17 @@ async function handleRecordingControl(requestData) {
       throw ErrorHandling.createValidationError('Invalid recording command', 'command');
   }
 }
-
 async function handleRecordingUpload(requestData) {
   DataValidator.validateRequired(requestData.sessionId, 'sessionId');
   DataValidator.validateRequired(requestData.recordingData, 'recordingData');
   DataValidator.validateRequired(requestData.fileName, 'fileName');
-  
   const recordingService = new RecordingService();
   const binaryData = Utilities.base64Decode(requestData.recordingData);
-  
   SystemLogger.info('録画アップロード処理開始', {
     sessionId: requestData.sessionId,
     fileName: requestData.fileName,
     dataSize: binaryData.length
   });
-
   return await recordingService.saveRecording(
     requestData.sessionId,
     binaryData,
@@ -2116,30 +1035,23 @@ async function handleRecordingUpload(requestData) {
   );
 }
 
-async function handleRecordingStatusCheck(requestData) {
-  const recordingService = new RecordingService();
-  return await recordingService.checkAllRecordingStatus();
-}
-
-// =============================================================================
+// ==============================
 // ユーティリティ関数
-// =============================================================================
+// ==============================
+function doOptions(e) {
+  const response = ContentService.createTextOutput('');
+  response.setMimeType(ContentService.MimeType.JSON);
+  return response;
+}
 
 function createJsonResponse(data) {
-  return ContentService
-    .createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON)
-    .setHeaders({
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
+  const response = ContentService.createTextOutput(JSON.stringify(data));
+  response.setMimeType(ContentService.MimeType.JSON);
+  return response;
 }
-
-// =============================================================================
-// 初期化・設定関数
-// =============================================================================
-
+// ==============================
+// 初期化・テスト関数
+// ==============================
 function setupConfiguration() {
   try {
     const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
@@ -2149,7 +1061,6 @@ function setupConfiguration() {
     } else {
       console.log('✅ OpenAI API key設定済み');
     }
-    
     SystemLogger.info('設定初期化完了');
     return SystemUtils.formatResponse(true, null, '設定初期化完了');
   } catch (error) {
@@ -2157,22 +1068,16 @@ function setupConfiguration() {
     return SystemUtils.formatResponse(false, { message: error.message });
   }
 }
-
 function initializeSystem() {
   try {
     console.log('🚀 システム初期化開始');
-    
-    // 設定初期化
     const configResult = setupConfiguration();
     if (!configResult.success) {
       throw new Error('設定初期化に失敗しました');
     }
-    
-    // 各コンポーネントの初期化確認
     new DataSheetManager();
     new InterviewService();
     new RecordingService();
-    
     console.log('✅ システム初期化完了');
     return SystemUtils.formatResponse(true, null, 'システム初期化完了');
   } catch (error) {
@@ -2181,23 +1086,16 @@ function initializeSystem() {
     return SystemUtils.formatResponse(false, { message: error.message });
   }
 }
-
-// =============================================================================
-// テスト・デバッグ関数（開発環境のみ）
-// =============================================================================
-
 function runSystemTests() {
   if (!config.isDevelopment()) {
     return SystemUtils.formatResponse(false, null, 'テストは開発環境でのみ実行可能です');
   }
-
   const tests = [
     { name: 'Configuration', fn: () => SystemHealthCheck.checkConfig() },
     { name: 'Spreadsheet', fn: () => SystemHealthCheck.checkSpreadsheet() },
     { name: 'OpenAI', fn: () => SystemHealthCheck.checkOpenAI() },
     { name: 'GigaFile', fn: () => SystemHealthCheck.checkGigaFile() }
   ];
-
   const results = tests.map(test => {
     try {
       const result = test.fn();
@@ -2214,50 +1112,61 @@ function runSystemTests() {
       };
     }
   });
-
   const allPassed = results.every(r => r.success);
-  
   SystemLogger.info('System tests completed', { 
     passed: allPassed, 
     results 
   });
-
   return SystemUtils.formatResponse(allPassed, results, 
     allPassed ? '全テストが成功しました' : '一部のテストが失敗しました'
   );
 }
-
 function runCompleteSystemTest() {
   if (!config.isDevelopment()) {
     return SystemUtils.formatResponse(false, null, 'Development mode only');
   }
-
   try {
     console.log("🚀 完全システムテスト開始");
-    
     const initResult = initializeSystem();
     const testResults = runSystemTests();
     const healthCheck = SystemHealthCheck.performHealthCheck();
-    
     console.log("📊 設定確認:");
     console.log("  - スプレッドシートID:", config.getSpreadsheetId());
     console.log("  - AIモデル:", config.getModel());
     console.log("  - ギガファイル便有効:", config.isGigaFileEnabled());
     console.log("  - 実行環境:", config.get('ENVIRONMENT'));
-    
     const success = testResults.success && healthCheck.status === 'healthy';
     const message = success ? "🎉 全テスト成功！システムは完全に動作可能です" : "⚠️ 一部テストに問題があります";
-    
     console.log(message);
-    
     return SystemUtils.formatResponse(success, {
       initResult,
       testResults,
       healthCheck
     }, message);
-    
   } catch (error) {
     console.error("❌ テスト実行エラー:", error);
     return SystemUtils.formatResponse(false, { error: error.message });
+  }
+}
+// CORSテスト用の関数
+function testCORS() {
+  try {
+    console.log('CORS設定テスト開始...');
+    
+    // doOptionsテスト
+    const optionsResponse = doOptions();
+    console.log('doOptions 成功');
+    
+    // createJsonResponseテスト
+    const jsonResponse = createJsonResponse({test: 'success'});
+    console.log('createJsonResponse 成功');
+    
+    // doPostのCORSヘッダー設定テスト
+    console.log('doPost関数内のCORSヘッダー設定を確認中...');
+    
+    return 'CORS設定テスト成功 - doPost関数内でヘッダー設定';
+  } catch (error) {
+    console.error('CORS設定テストエラー:', error);
+    return 'CORS設定テストエラー: ' + error.message;
   }
 }

@@ -1,0 +1,9 @@
+name = "ai-interview-system"
+compatibility_date = "2023-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+[[pages_build_output_dir]]
+path = "."
+
+[env.production]
+name = "ai-interview-system"

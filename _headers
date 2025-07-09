@@ -1,0 +1,16 @@
+# Static assets
+/*.js
+  Content-Type: application/javascript; charset=utf-8
+
+/js/*
+  Content-Type: application/javascript; charset=utf-8
+
+/css/*
+  Content-Type: text/css; charset=utf-8
+
+# API endpoints
+/api/*
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET, POST, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, Authorization
+  Access-Control-Max-Age: 86400

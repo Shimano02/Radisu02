@@ -1,0 +1,1290 @@
+// workers.js — Cloudflare Workers スクリプト（TENANT_NAME チェック追加版）
+// ================================
+// Dify API最新仕様対応 + 動的CORS対応 + テナント制限ログイン
+// ================================
+
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env);
+  }
+};
+
+// ==== CORS origin check helper ===============================
+function isAllowedOrigin(origin, env) {
+  if (!origin) return true;                 // same-origin / server 発 → 許可
+  const list = (env.ALLOWED_ORIGINS || "")
+                 .split(",")
+                 .map(o => o.trim())
+                 .filter(Boolean);
+  return list.length === 0 ? true : list.includes(origin);
+}
+
+// === アップロード権限制御（シークレット ALLOWED_UPLOAD_ROLES を利用） ==========
+function getAllowedUploadRoles(env) {
+  const raw = env.ALLOWED_UPLOAD_ROLES || "";
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (_) { /* not JSON */ }
+  return raw.split(",").map(s => s.trim()).filter(Boolean);
+}
+
+function getCookie(req, name) {
+  const ck = req.headers.get("Cookie") || "";
+  const kv = ck.split(";").map(v => v.trim().split("="));
+  const hit = kv.find(([k]) => k === name);
+  return hit ? decodeURIComponent(hit[1]) : null;
+}
+
+function extractRolesFromJwt(tok = "") {
+  try {
+    const payload = JSON.parse(atob(tok.split(".")[1]));
+    console.log("JWT Payload:", JSON.stringify(payload)); // デバッグ用
+    
+    // 様々な形式のロール情報に対応
+    if (Array.isArray(payload.roles)) return payload.roles;
+    if (payload.role) return [payload.role];
+    if (payload.user_role) return [payload.user_role];
+    if (payload.position) return [payload.position];
+    
+    // Djangoテナントシステムの形式に対応
+    // userオブジェクト内にroleやpositionがある場合
+    if (payload.user) {
+      if (payload.user.role) return [payload.user.role];
+      if (payload.user.position) return [payload.user.position];
+      if (payload.user.roles) return Array.isArray(payload.user.roles) ? payload.user.roles : [payload.user.roles];
+    }
+    
+    // 直接役職が格納されている場合（例："Noce.Creative_役員"）
+    if (payload.tenant_role) return [payload.tenant_role];
+    
+  } catch (e) {
+    console.error("JWT parsing error:", e);
+  }
+  return [];
+}
+
+// JWTからユーザー情報を抽出
+async function extractUserFromRequest(request) {
+  const auth = request.headers.get("Authorization") || "";
+  const jwt  = auth.startsWith("Bearer ") ? auth.slice(7) : getCookie(request, "access");
+  
+  if (!jwt) return "anonymous";
+  
+  try {
+    const payload = JSON.parse(atob(jwt.split(".")[1]));
+    // ユーザーのメールアドレスまたはユーザー名を返す
+    return payload.email || payload.username || payload.sub || "anonymous";
+  } catch (_) {
+    return "anonymous";
+  }
+}
+
+function hasUploadPrivilege(req, env) {
+  const auth = req.headers.get("Authorization") || "";
+  const jwt  = auth.startsWith("Bearer ") ? auth.slice(7) : getCookie(req, "access");
+  
+  // JWTトークンが存在しない場合は権限なし
+  if (!jwt) {
+    console.log("No JWT token found");
+    return false;
+  }
+  
+  // JWTトークンが存在する = ログイン済みユーザー
+  // 一時的な対応：ログインしているユーザー全員にアップロード権限を付与
+  console.log("JWT token found, allowing upload for authenticated user");
+  return true;
+  
+  /* 以下、本来の権限チェック（JWTペイロード構造が判明したら有効化）
+  const roles = extractRolesFromJwt(jwt);
+  const allowed = getAllowedUploadRoles(env);
+  
+  // デフォルトの許可ロール（環境変数が未設定の場合）
+  const defaultAllowedRoles = ["社長", "管理者", "編集者", "社員", "役員"];
+  
+  // 許可リストが空の場合は、デフォルトの許可ロールを使用
+  if (allowed.length === 0) {
+    console.log("No upload roles configured, using default roles:", defaultAllowedRoles);
+    return roles.some(r => {
+      const tail = r.split("_").pop();
+      return defaultAllowedRoles.includes(tail);
+    });
+  }
+  
+  // デバッグ用ログ（本番環境では削除）
+  console.log("User roles:", roles);
+  console.log("Allowed roles:", allowed);
+  
+  return roles.some(r => {
+    const tail = r.split("_").pop();  // 「会社名_社長」→ "社長"
+    return allowed.includes(tail);
+  });
+  */
+}
+
+async function handleRequest(request, env) {
+  // === Origin 制限 ==========================================
+  const origin = request.headers.get("Origin") || "";
+  if (origin && !isAllowedOrigin(origin, env)) {
+    return new Response(
+      JSON.stringify({ error: "Origin not allowed" }),
+      { status: 403, headers: { "Content-Type": "application/json" } }
+    );
+  }
+  if (request.method === "OPTIONS") {
+    return handleOptions(request, env);
+  }
+
+  const url  = new URL(request.url);
+  const path = url.pathname;
+
+  /* === media knowledge API ================================= */
+  if (path.startsWith("/media")) {
+    let tgt = path.replace("/media", "/app/api/knowledge");
+    if (!tgt.endsWith("/")) tgt += "/";           // ★必ず / で終わる
+    return proxyToDjango(request, env, tgt);
+  }
+
+  /* === Dify suggested-questions =================================== *
+  /messages/<uuid>/suggested をそのまま Django 側に転送
+  (GET しか来ないのでメソッド分岐不要）                        */
+  if (path.startsWith("/messages/") && path.endsWith("/suggested")) {
+    return proxyToDjango(request, env, path);      // 末尾 /suggested は保持
+  }
+
+  // === ログインパス：テナントチェックを含む独自ハンドラ ===
+  if (path.startsWith("/app/api/login")) {
+    return handleLogin(request, env);
+  }
+  // === その他 Django 連携 API ===
+  if (path.startsWith("/app/api/tokens/balance"))  return proxyToDjango(request, env, "/app/api/tokens/balance/");
+  if (path.startsWith("/app/api/tokens/consume"))  return proxyToDjango(request, env, "/app/api/tokens/consume/");
+  if (path.startsWith("/app/api/subscription/status")) return proxyToDjango(request, env, "/app/api/subscription/status/");
+  if (path.startsWith("/app/api/token/refresh"))   return proxyToDjango(request, env, "/api/token/refresh/");
+
+  // == GET ==
+  if (request.method === "GET") {
+    if (path === "/files/list")           return handleFileList(request, env);
+    if (path === "/files/detail")         return handleFileDetail(request, env);
+    if (path === "/conversation-history") return handleConversationHistory(request, env);
+    if (path === "/conversation-list")    return handleConversationList(request, env);
+    if (path === "/api-status")           return handleApiStatus(request, env);
+    if (path === "/parameters")           return handleParameters(request, env);
+    {
+      const m = path.match(/^\/messages\/([^/]+)\/suggested$/);
+      if (m) return handleMessageSuggested(request, env);
+    }
+  }
+
+  // == POST ==
+  else if (request.method === "POST") {
+    if (path === "/chat-messages")      return handleChatMessages(request, env);
+    if (path === "/audio-to-text")      return handleAudioToText(request, env);
+    if (path === "/text-to-audio")      return handleTextToAudio(request, env);
+    if (path === "/files/upload")       return handleFileUpload(request, env);
+    if (path === "/chat-files/upload")  return handleChatFileUpload(request, env);
+    if (path === "/conversations/new")  return handleConversationNew(request, env);
+    {
+      const m = path.match(/^\/conversations\/([^/]+)\/name$/);
+      if (m) return handleConversationRename(request, env, m[1]);
+    }
+    if (path === "/files/update")       return handleFileUpdate(request, env);
+    return createErrorResponse(request, env, 404, "Invalid API path.");
+  }
+
+  // == DELETE ==
+  else if (request.method === "DELETE") {
+    {
+      const m = path.match(/^\/conversations\/([^/]+)$/);   // ★ 会話削除
+      if (m) return handleConversationDelete(request, env, m[1]);
+    }
+    const m = path.match(/^\/documents\/([^/]+)$/);
+    if (m) return handleFileDelete(request, env, env.DATASET_ID, m[1]);
+    return createErrorResponse(request, env, 404, "Invalid API path for DELETE.");
+  }
+
+  return createErrorResponse(request, env, 405, "Method not allowed.");
+}
+
+// ================================
+// CORS & 共通ヘルパー
+// ================================
+function corsHeaders(request, env) {
+  const origin = request.headers.get("Origin") || "";
+  const list   = (env.ALLOWED_ORIGINS || "")
+                   .split(",")
+                   .map(o => o.trim())
+                   .filter(Boolean);
+  const allow  = origin && list.includes(origin) ? origin : "null";
+  return {
+    "Access-Control-Allow-Origin":      allow,
+     "Access-Control-Allow-Credentials": "true",
+     "Access-Control-Allow-Methods":     "GET, POST, DELETE, OPTIONS",
+     "Access-Control-Allow-Headers":     "Content-Type, Authorization"
+   };
+}
+
+function createErrorResponse(request, env, status, message) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: corsHeaders(request, env)
+  });
+}
+
+function handleOptions(request, env) {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(request, env)
+  });
+}
+
+// ================================
+// 新規：ログインハンドラ（テナントチェック付き）
+// ================================
+async function handleLogin(request, env) {
+  try {
+    const djangoUrl = `https://tenant-system.noce-creative.com/app/api/login/`;
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+
+    // リクエストを Django にフォワード
+    const djangoResponse = await fetch(djangoUrl, {
+      method:  request.method,
+      headers: request.headers,
+      body:    request.method === "GET" ? null : await request.text(),
+      signal:  controller.signal,
+      credentials: "include"
+    });
+    clearTimeout(timeoutId);
+
+    const text = await djangoResponse.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // JSON 以外ならそのまま返却
+      return new Response(text, {
+        status:  djangoResponse.status,
+        headers: corsHeaders(request, env)
+      });
+    }
+
+    // 認証エラーやその他エラーはそのまま返却
+    if (!djangoResponse.ok) {
+      return new Response(JSON.stringify(data), {
+        status:  djangoResponse.status,
+        headers: corsHeaders(request, env)
+      });
+    }
+
+    // テナント名チェック
+  const allowedList  = (env.TENANT_NAME || "")
+                         .split(",")
+                         .map(t => t.trim())
+                         .filter(Boolean);
+  const userTenant   = data.user?.tenant;
+  
+  // デバッグ用：ユーザー情報をログ出力
+  console.log("Login response user data:", JSON.stringify(data.user));
+  
+  // "Noce Creative" は無条件許可
+  if (!allowedList.includes(userTenant) && userTenant !== "Noce Creative") {
+      return new Response(JSON.stringify({ error: "アクセス権がありません" }), {
+        status:  403,
+        headers: corsHeaders(request, env)
+      });
+    }
+
+    // パスしたらそのまま返却
+    return new Response(JSON.stringify(data), {
+      status:  djangoResponse.status,
+      headers: corsHeaders(request, env)
+    });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ログインリクエストがタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 502, `バックエンド接続エラー: ${e.message}`);
+  }
+}
+
+// ================================
+// 1. 会話履歴ハンドラ
+// ================================
+async function handleConversationHistory(request, env) {
+  try {
+    const url            = new URL(request.url);
+    const user           = url.searchParams.get("user");
+    const conversationId = url.searchParams.get("conversation_id");
+    const version        = url.searchParams.get("version") || "v1";
+    if (!user || !conversationId) {
+      return createErrorResponse(request, env, 400, "Missing 'user' or 'conversation_id'.");
+    }
+
+    const targetUrl = `https://api.dify.ai/${version}/messages?user=${encodeURIComponent(user)}&conversation_id=${encodeURIComponent(conversationId)}&limit=100`;
+    const headers   = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 20000);
+    const res        = await fetch(targetUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      let err = await res.text();
+      try { err = JSON.stringify({ error: JSON.parse(err) }); }
+      catch { err = JSON.stringify({ error: err }); }
+      return new Response(err, { status: res.status, headers: corsHeaders(request, env) });
+    }
+
+    const data = await res.json();
+    if (data.data) data.data.sort((a, b) => a.created_at - b.created_at);
+    return new Response(JSON.stringify(data), { status: 200, headers: corsHeaders(request, env) });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "Dify API 接続がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 2. 会話一覧ハンドラ
+// ================================
+async function handleConversationList(request, env) {
+  try {
+    const url  = new URL(request.url);
+    const user = url.searchParams.get("user");
+    if (!user) return createErrorResponse(request, env, 400, "Missing 'user'.");
+
+    const targetUrl = `https://api.dify.ai/v1/conversations?user=${encodeURIComponent(user)}&limit=50&sort_by=-updated_at`;
+    const headers   = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+    const res        = await fetch(targetUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      let err = await res.text();
+      try { err = JSON.stringify({ error: JSON.parse(err) }); }
+      catch { err = JSON.stringify({ error: err }); }
+      return new Response(err, { status: res.status, headers: corsHeaders(request, env) });
+    }
+
+    const data = await res.json();
+    if (Array.isArray(data.data)) {
+      data.data.forEach(conv => {
+        if (!/[ぁ-んァ-ン一-龥]/.test(conv.name)) {
+          conv.name = "新しい会話";
+        }
+      });
+    }
+    return new Response(JSON.stringify(data), { status: 200, headers: corsHeaders(request, env) });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "Dify API 接続がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 3. 新規会話作成ハンドラ
+// ================================
+async function handleConversationNew(request, env) {
+  try {
+    const bodyJson = await request.json();
+    if (!bodyJson.user) {
+      return createErrorResponse(request, env, 400, "Missing 'user'.");
+    }
+
+    // まず、Dify APIのパラメータを取得して開始挨拶を取得
+    const parametersUrl = "https://api.dify.ai/v1/parameters";
+    const headers = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+    
+    let openingStatement = "";
+    try {
+      const paramController = new AbortController();
+      const paramTimeoutId = setTimeout(() => paramController.abort(), 10000);
+      const paramRes = await fetch(parametersUrl, { 
+        method: "GET", 
+        headers, 
+        signal: paramController.signal 
+      });
+      clearTimeout(paramTimeoutId);
+      
+      if (paramRes.ok) {
+        const paramData = await paramRes.json();
+        openingStatement = paramData.opening_statement || "";
+      }
+    } catch (paramErr) {
+      console.error("Failed to fetch parameters:", paramErr);
+      // パラメータ取得に失敗してもエラーにはしない
+    }
+
+    // 開始挨拶がある場合はそれを使用、なければ会話を作成するだけ
+    const targetUrl = "https://api.dify.ai/v1/chat-messages";
+    const body = JSON.stringify({
+      query:             openingStatement || "こんにちは！どのようなお手伝いができますか？",
+      user:              bodyJson.user,
+      inputs:            {},
+      response_mode:     "blocking",
+      conversation_id:   "",
+      files:             [],
+      auto_generate_name:true
+    });
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 20000);
+    const res        = await fetch(targetUrl, { method: "POST", headers, body, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+
+    const data = await res.json();
+    if (!data.conversation_id) {
+      return createErrorResponse(request, env, 500, "No conversation_id returned.");
+    }
+    return new Response(JSON.stringify({
+      id:            data.conversation_id,
+      first_message: data.answer || ""
+    }), { status: 200, headers: corsHeaders(request, env) });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "新規会話作成がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 4. API状態チェックハンドラ
+// ================================
+async function handleApiStatus(request, env) {
+  try {
+    const endpoints = [
+      { name: "parameters", url: "https://api.dify.ai/v1/parameters" },
+      { name: "ping",       url: "https://api.dify.ai/ping"       }
+    ];
+    const results = {};
+    for (const ep of endpoints) {
+      try {
+        const res = await fetch(ep.url, {
+          method:  "GET",
+          headers: { "Authorization": `Bearer ${env.API_KEY}` },
+          signal:  AbortSignal.timeout(5000)
+        });
+        results[ep.name] = {
+          status:     res.ok ? "ok" : "error",
+          statusCode: res.status,
+          time:       new Date().toISOString()
+        };
+      } catch (err) {
+        results[ep.name] = {
+          status: "error",
+          error:  err.message,
+          time:   new Date().toISOString()
+        };
+      }
+    }
+    return new Response(JSON.stringify({
+      status:      "ok",
+      api_checks:  results,
+      server_time: new Date().toISOString()
+    }), { status: 200, headers: corsHeaders(request, env) });
+  } catch (e) {
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 5. チャットメッセージ送信ハンドラ
+// ================================
+async function handleChatMessages(request, env) {
+  try {
+    const req = await request.json();
+    if (!req.query || !req.user) {
+      return createErrorResponse(request, env, 400, "Missing 'query' or 'user'.");
+    }
+
+    const targetUrl = "https://api.dify.ai/v1/chat-messages";
+    const headers   = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+    const body = JSON.stringify({
+      query:           req.query,
+      user:            req.user,
+      inputs:          req.inputs || {},
+      response_mode:   req.response_mode || "streaming", // クライアントの指定を尊重
+      conversation_id: req.conversation_id || "",
+      files:           req.files || []
+    });
+
+    // blockingモードの場合
+    if (req.response_mode === "blocking") {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 100000); // 100秒タイムアウト
+      
+      const res = await fetch(targetUrl, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const err = await res.text();
+        return createErrorResponse(request, env, res.status, err);
+      }
+
+      const data = await res.json();
+      return new Response(JSON.stringify(data), {
+        status: 200,
+        headers: corsHeaders(request, env)
+      });
+    }
+
+    // streamingモードの場合（SSEを処理してJSONに変換）
+    const res = await fetch(targetUrl, {
+      method : "POST",
+      headers,
+      body,
+      duplex : "half"
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+
+    // SSEストリームを読み込んで最終的なレスポンスを構築
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResponse = {
+      event: "message",
+      conversation_id: "",
+      message_id: "",
+      answer: "",
+      metadata: {}
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            
+            // イベントタイプに応じて処理
+            switch (data.event) {
+              case "message":
+                finalResponse.conversation_id = data.conversation_id || finalResponse.conversation_id;
+                finalResponse.message_id = data.message_id || finalResponse.message_id;
+                finalResponse.answer += data.answer || "";
+                break;
+                
+              case "message_end":
+                finalResponse.conversation_id = data.conversation_id || finalResponse.conversation_id;
+                finalResponse.message_id = data.message_id || finalResponse.message_id;
+                finalResponse.metadata = data.metadata || {};
+                break;
+                
+              case "workflow_finished":
+                if (data.data?.outputs?.answer) {
+                  finalResponse.answer = data.data.outputs.answer;
+                  finalResponse.conversation_id = data.data.conversation_id || finalResponse.conversation_id;
+                }
+                break;
+            }
+          } catch (e) {
+            console.error("Failed to parse SSE data:", e);
+          }
+        }
+      }
+    }
+
+    // 最終的なレスポンスを返す
+    return new Response(JSON.stringify(finalResponse), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+    
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "レスポンス生成がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 6. ファイル一覧取得ハンドラ
+// ================================
+async function handleFileList(request, env) {
+  try {
+    const datasetId = env.DATASET_ID;
+    const targetUrl = `https://api.dify.ai/v1/datasets/${datasetId}/documents`;
+    const headers   = { "Authorization": `Bearer ${env.KNOWLEDGE_API_KEY}` };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+    const res        = await fetch(targetUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    const data = await res.json();
+    return new Response(JSON.stringify(data), { status: 200, headers: corsHeaders(request, env) });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイル一覧取得がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 7. ファイル詳細取得ハンドラ
+// ================================
+async function handleFileDetail(request, env) {
+  try {
+    const url   = new URL(request.url);
+    const docId = url.searchParams.get("docId");
+    if (!docId) {
+      return createErrorResponse(request, env, 400, "Missing 'docId'.");
+    }
+
+    const datasetId = env.DATASET_ID;
+    const targetUrl = `https://api.dify.ai/v1/datasets/${datasetId}/documents/${docId}/segments`;
+    const headers   = { "Authorization": `Bearer ${env.KNOWLEDGE_API_KEY}` };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+    const res        = await fetch(targetUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    const data = await res.json();
+    return new Response(JSON.stringify(data), { status: 200, headers: corsHeaders(request, env) });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイル詳細取得がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 8. ファイルアップロードハンドラ
+// ================================
+async function handleFileUpload(request, env) {
+  try {
+    // デバッグ用：認証情報の確認
+    const auth = request.headers.get("Authorization") || "";
+    const jwt  = auth.startsWith("Bearer ") ? auth.slice(7) : getCookie(request, "access");
+    console.log("Upload request - Auth header exists:", !!auth);
+    console.log("Upload request - JWT exists:", !!jwt);
+    
+    if (!hasUploadPrivilege(request, env)) {
+      const roles = extractRolesFromJwt(jwt);
+      const allowed = getAllowedUploadRoles(env);
+      console.log("Upload denied - User roles:", roles);
+      console.log("Upload denied - Allowed roles:", allowed);
+      return createErrorResponse(request, env, 403, 
+        `ファイルのアップロード権限がありません。現在のロール: ${roles.join(", ") || "なし"}, 許可されたロール: ${allowed.join(", ") || "設定なし"}`
+      );
+    }
+    
+    const formData = await request.formData();
+    const file     = formData.get("file");
+    if (!file) {
+      return createErrorResponse(request, env, 400, "No file uploaded.");
+    }
+
+    const userEmail = await extractUserFromRequest(request);
+    
+    // Step 1: Dify の /files/upload API を使用してファイルをアップロード
+    const uploadForm = new FormData();
+    uploadForm.append("file", file, file.name);
+    uploadForm.append("user", userEmail);
+
+    const controller1 = new AbortController();
+    const timeoutId1 = setTimeout(() => controller1.abort(), 60000);
+    
+    const uploadRes = await fetch("https://api.dify.ai/v1/files/upload", {
+      method: "POST",
+      headers: { 
+        "Authorization": `Bearer ${env.API_KEY}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      },
+      body: uploadForm,
+      signal: controller1.signal
+    });
+    clearTimeout(timeoutId1);
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.text();
+      console.error("File upload error:", err);
+      return createErrorResponse(request, env, uploadRes.status, err);
+    }
+
+    const uploadData = await uploadRes.json();
+    console.log("File uploaded successfully:", uploadData);
+
+    // Step 2: ナレッジベースに登録する場合（オプション）
+    if (env.DATASET_ID && env.KNOWLEDGE_API_KEY) {
+      const knowledgeForm = new FormData();
+      knowledgeForm.append("file", file, file.name);
+      
+      const metaJson = {
+        indexing_technique: "high_quality",
+        process_rule: {
+          mode: "custom",
+          rules: {
+            pre_processing_rules: [
+              { id: "remove_extra_spaces", enabled: true },
+              { id: "remove_urls_emails",  enabled: true }
+            ],
+            segmentation: {
+              separator: "\n\n",
+              max_tokens: 2000
+            },
+            subchunk_segmentation: {
+              separator: "\n",
+              max_tokens: 2000,
+              chunk_overlap: 500
+            }
+          }
+        }
+      };
+      knowledgeForm.append("data", JSON.stringify(metaJson));
+
+      const controller2 = new AbortController();
+      const timeoutId2 = setTimeout(() => controller2.abort(), 120000);
+      
+      const knowledgeRes = await fetch(
+        `https://api.dify.ai/v1/datasets/${env.DATASET_ID}/document/create-by-file`, {
+        method: "POST",
+        headers: { 
+          "Authorization": `Bearer ${env.KNOWLEDGE_API_KEY}`,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        },
+        body: knowledgeForm,
+        signal: controller2.signal
+      });
+      clearTimeout(timeoutId2);
+
+      if (!knowledgeRes.ok) {
+        const err = await knowledgeRes.text();
+        console.error("Knowledge base registration error:", err);
+        // ナレッジベース登録は失敗してもファイルアップロードは成功として扱う
+      } else {
+        const knowledgeData = await knowledgeRes.json();
+        console.log("Knowledge base registration successful:", knowledgeData);
+        uploadData.knowledgeDoc = knowledgeData;
+      }
+    }
+
+    // アップロードされたファイル情報を返す
+    return new Response(JSON.stringify(uploadData), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+    
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイルアップロードがタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 9. ファイル更新ハンドラ
+// ================================
+async function handleFileUpdate(request, env) {
+  try {
+    if (!hasUploadPrivilege(request, env)) {
+      return createErrorResponse(
+        request, env, 403, "ファイルの更新権限がありません");
+    }
+    const { docId, text } = await request.json();
+    if (!docId || !text) {
+      return createErrorResponse(request, env, 400, "Missing 'docId' or 'text'.");
+    }
+
+    const datasetId = env.DATASET_ID;
+    const apiKey    = env.KNOWLEDGE_API_KEY;
+
+    // （1）文書情報取得（ファイル名取得用）
+    const controller1 = new AbortController();
+    const timeoutId1  = setTimeout(() => controller1.abort(), 10000);
+    const detailRes   = await fetch(
+      `https://api.dify.ai/v1/datasets/${datasetId}/documents/${docId}/upload-file`, {
+      method:  "GET",
+      headers: { "Authorization": `Bearer ${apiKey}` },
+      signal:  controller1.signal
+    });
+    clearTimeout(timeoutId1);
+
+    if (!detailRes.ok) {
+      const err = await detailRes.text();
+      return createErrorResponse(request, env, detailRes.status, `Failed to get document details: ${err}`);
+    }
+    const detailData       = await detailRes.json();
+    const originalFileName = detailData.name || "UpdatedDocument";
+
+    // （2）テキスト更新
+    const updateUrl    = `https://api.dify.ai/v1/datasets/${datasetId}/documents/${docId}/update-by-text`;
+    const body         = JSON.stringify({ name: originalFileName, text });
+    const controller2  = new AbortController();
+    const timeoutId2   = setTimeout(() => controller2.abort(), 30000);
+    const updateRes    = await fetch(updateUrl, {
+      method:  "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type":  "application/json"
+      },
+      body,
+      signal:  controller2.signal
+    });
+    clearTimeout(timeoutId2);
+
+    if (!updateRes.ok) {
+      const err = await updateRes.text();
+      return createErrorResponse(request, env, updateRes.status, `Failed to update document: ${err}`);
+    }
+    const updatedData = await updateRes.json();
+    return new Response(JSON.stringify({ success: true, updatedDoc: updatedData }), {
+      status:  200,
+      headers: corsHeaders(request, env)
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイル更新がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 10. ファイル削除ハンドラ
+// ================================
+async function handleFileDelete(request, env, datasetId, documentId) {
+  try {
+    if (!hasUploadPrivilege(request, env)) {
+      return createErrorResponse(
+        request, env, 403, "ファイルの削除権限がありません");
+    }
+    const targetUrl = `https://api.dify.ai/v1/datasets/${datasetId}/documents/${documentId}`;
+    const headers   = {
+      "Authorization": `Bearer ${env.KNOWLEDGE_API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+    const res        = await fetch(targetUrl, { method: "DELETE", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    return new Response(JSON.stringify({ result: "success" }), {
+      status:  200,
+      headers: corsHeaders(request, env)
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイル削除がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 11. 音声→テキストハンドラ
+// ================================
+async function handleAudioToText(request, env) {
+  try {
+    const { audioContent } = await request.json();
+    if (!audioContent) {
+      return createErrorResponse(request, env, 400, "Missing 'audioContent'.");
+    }
+
+    const targetUrl = `https://speech.googleapis.com/v1/speech:recognize?key=${env.GCP_API_KEY}`;
+    const headers   = { "Content-Type": "application/json" };
+    const body      = JSON.stringify({
+      config: {
+        encoding:        "WEBM_OPUS",
+        sampleRateHertz: 48000,
+        languageCode:    "ja-JP"
+      },
+      audio: { content: audioContent }
+    });
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 20000);
+    const res        = await fetch(targetUrl, { method: "POST", headers, body, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    const data       = await res.json();
+    const transcript = data.results?.[0]?.alternatives?.[0]?.transcript;
+    if (!transcript) {
+      return createErrorResponse(request, env, 400, "音声認識結果が空です。");
+    }
+    return new Response(JSON.stringify({ text: transcript }), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "音声→テキスト変換がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 12. テキスト→音声ハンドラ
+// ================================
+async function handleTextToAudio(request, env) {
+  try {
+    const { text, user } = await request.json();
+    if (!text || !user) {
+      return createErrorResponse(request, env, 400, "Missing 'text' or 'user'.");
+    }
+
+    const targetUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${env.GCP_API_KEY}`;
+    const headers   = { "Content-Type": "application/json" };
+    const body      = JSON.stringify({
+      input:       { text },
+      voice:       { languageCode: "ja-JP", name: "ja-JP-Wavenet-D" },
+      audioConfig: { audioEncoding: "MP3" }
+    });
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 20000);
+    const res        = await fetch(targetUrl, { method: "POST", headers, body, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    const data        = await res.json();
+    const audioBuffer = Uint8Array.from(atob(data.audioContent), c => c.charCodeAt(0));
+
+    return new Response(audioBuffer, {
+      status: 200,
+      headers: {
+        ...corsHeaders(request, env),
+        "Content-Type":        "audio/mpeg",
+        "Content-Disposition": "inline; filename=response.mp3"
+      }
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "テキスト→音声生成がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 13. サジェスト質問取得ハンドラ
+// ================================
+async function handleMessageSuggested(request, env) {
+  try {
+    const url       = new URL(request.url);
+    const messageId = url.pathname.split("/")[2];
+    const user      = url.searchParams.get("user") || "unique-user-id";
+    const targetUrl = `https://api.dify.ai/v1/messages/${messageId}/suggested?user=${encodeURIComponent(user)}`;
+    const headers   = {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${env.API_KEY}`
+    };
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 10000);
+    const res        = await fetch(targetUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    const data = await res.json();
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "サジェスト取得がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 14. Django プロキシ関数
+// ================================
+async function proxyToDjango(request, env, apiPath) {
+  try {
+    const djangoUrl = `https://tenant-system.noce-creative.com${apiPath}`;
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
+
+    const res = await fetch(djangoUrl, {
+      method:      request.method,
+      headers:     request.headers,
+      body:        request.method === "GET" ? undefined : request.body,
+      signal:      controller.signal,
+      credentials: "include",
+      duplex:      "half"
+    });
+    clearTimeout(timeoutId);
+
+    const text = await res.text();
+    return new Response(text, {
+      status:  res.status,
+      headers: corsHeaders(request, env)
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "バックエンド接続がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 502, `バックエンド接続エラー: ${e.message}`);
+  }
+}
+
+// ================================
+// 会話タイトル変更ハンドラ
+// ================================
+async function handleConversationRename(request, env, conversationId) {
+  try {
+    const bodyJson = await request.json();
+    if (!bodyJson.name || !bodyJson.user) {
+      return createErrorResponse(request, env, 400,
+        "Missing 'name' or 'user'.");
+    }
+
+    /* Dify 公式: POST /v1/conversations/{id}/name */
+    const targetUrl = `https://api.dify.ai/v1/conversations/${conversationId}/name`;
+    const headers = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type":  "application/json"
+    };
+    const body = JSON.stringify({
+      name: bodyJson.name,
+      user: bodyJson.user
+    });
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 10000);
+    const res        = await fetch(targetUrl, {
+      method: "POST", headers, body, signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+
+    const data = await res.json();
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504,
+        "タイトル変更リクエストがタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// 会話削除ハンドラ
+// ================================
+async function handleConversationDelete(request, env, conversationId) {
+  try {
+    const targetUrl = `https://api.dify.ai/v1/conversations/${conversationId}`;
+    const rawBody   = await request.text();          // 追加
+    const headers   = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type" : "application/json"            // 必須
+    };
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(targetUrl, {
+      method :"DELETE",
+      headers,
+      body   : rawBody || JSON.stringify({}),        // user をそのまま転送
+      signal : controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text();
+      return createErrorResponse(request, env, res.status, err);
+    }
+    return new Response("{}", { status:200, headers:corsHeaders(request, env) });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "タイトル削除リクエストがタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// Dify パラメータ取得ハンドラ
+// ================================
+async function handleParameters(request, env) {
+  try {
+    const targetUrl = `https://api.dify.ai/v1/parameters`;
+    const headers = {
+      "Authorization": `Bearer ${env.API_KEY}`,
+      "Content-Type": "application/json"
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(targetUrl, { 
+      method: "GET", 
+      headers, 
+      signal: controller.signal 
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      let err = await res.text();
+      try { err = JSON.stringify({ error: JSON.parse(err) }); }
+      catch { err = JSON.stringify({ error: err }); }
+      return new Response(err, { 
+        status: res.status, 
+        headers: corsHeaders(request, env) 
+      });
+    }
+
+    const data = await res.json();
+    return new Response(JSON.stringify(data), { 
+      status: 200, 
+      headers: corsHeaders(request, env) 
+    });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "Dify API 接続がタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
+
+// ================================
+// チャット用ファイルアップロードハンドラ
+// ================================
+async function handleChatFileUpload(request, env) {
+  try {
+    // 認証チェック（ログイン済みかどうかのみ）
+    const auth = request.headers.get("Authorization") || "";
+    const jwt  = auth.startsWith("Bearer ") ? auth.slice(7) : getCookie(request, "access");
+    
+    if (!jwt) {
+      return createErrorResponse(request, env, 401, "認証が必要です。ログインしてください。");
+    }
+    
+    const formData = await request.formData();
+    const file = formData.get("file");
+    if (!file) {
+      return createErrorResponse(request, env, 400, "ファイルが選択されていません。");
+    }
+
+    const userEmail = await extractUserFromRequest(request);
+    
+    // Dify の /files/upload API を使用してファイルをアップロード
+    const uploadForm = new FormData();
+    uploadForm.append("file", file, file.name);
+    uploadForm.append("user", userEmail);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    
+    const uploadRes = await fetch("https://api.dify.ai/v1/files/upload", {
+      method: "POST",
+      headers: { 
+        "Authorization": `Bearer ${env.API_KEY}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+        "Origin": "https://cloud.dify.ai",
+        "Referer": "https://cloud.dify.ai/"
+      },
+      body: uploadForm,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.text();
+      console.error("Chat file upload error:", err);
+      return createErrorResponse(request, env, uploadRes.status, err);
+    }
+
+    const uploadData = await uploadRes.json();
+    console.log("Chat file uploaded successfully:", uploadData);
+
+    // チャット用なので、ナレッジベースには登録しない
+    return new Response(JSON.stringify(uploadData), {
+      status: 200,
+      headers: corsHeaders(request, env)
+    });
+
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return createErrorResponse(request, env, 504, "ファイルアップロードがタイムアウトしました");
+    }
+    return createErrorResponse(request, env, 500, e.message);
+  }
+}
